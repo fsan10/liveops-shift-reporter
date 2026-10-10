@@ -1,0 +1,24 @@
+# AGENTS.md
+
+## Project purpose
+Build the live-stream operations data collection and reporting system described in the project brief. The system connects to the active Douyin Compass browser through Playwright/CDP in the Cloak Login test environment, extracts metrics from documented page APIs where available, captures the specified screenshots, sends reports to Feishu, and synchronizes rows to a Feishu Bitable.
+
+## Working rules
+- Keep the test profile and production browser modes separate. Resolve Cloak's current endpoint through its local MCP service; start the configured profile only when it is not running. Never stop or restart an already-running profile.
+- Discover the current live room from the Compass realtime API on each current-day run. Reload the matching live-detail tab for every funnel screenshot; reuse matching professional, basic, and Qianchuan realtime dashboards without reloading. Await fresh valid metric responses and rendered cards before screenshots; Qianchuan must select 全域支付数据 and use its payment overview dataset. Direct routes take priority; use the documented DOM clicks only after a direct route fails.
+- Prefer page network APIs and structured response payloads for metrics. Use DOM extraction only when no stable API response is available; capture the conversion funnel as an element screenshot and other report views as full-page screenshots.
+- Treat page/API values as source data. Keep derived metrics and their formulas explicit, versioned, and covered by tests.
+- Normal company shifts use actual cumulative capture snapshots as operational handoffs, with the first host starting at zero and later hosts subtracting the previous final snapshot of the same room/account. Normal navigation, settle and screenshot latency is recorded, not classified as a collection failure. Session interruptions are marked manually on the schedule row: capture and persist the old room fragment immediately, start the restarted room at zero, merge saved fragments at shift end, and hand only the newest room's final snapshot to the next host. Repeating a mark replaces the same room fragment. Use fully paginated history and confirmed detail timestamps to locate manually interrupted rooms; never automatically merge unmarked sessions or subtract across rooms/accounts. Counter increments are not interval/cross-session unique users; average/rate cards retain their explicitly disclosed snapshot scope. Provisional/interruption captures cannot become the following host's end baseline.
+- Keep report and discovery browser tabs open after capture, including on failure; remove only the collector's response listeners. Reuse matching tabs, reload the live-detail funnel, and await fresh API/card data on retained realtime dashboards.
+- Store credentials and session endpoints in environment variables or encrypted settings. Never commit tokens, cookies, CDP endpoints, screenshots containing merchant data, or `.env` files.
+- Keep scheduled and manual runs idempotent, auditable, and safe to retry. Record per-page, per-screenshot, Feishu, and Bitable outcomes.
+- Roster dates before today in Asia/Shanghai are read-only in both views and mutation APIs. List history is collapsed by default; calendar history stays visible in gray. Highlight the entire current date and reveal it when opening the roster or switching views. Automatic fill/reset may change only today and future dates; incomplete local drafts must never break roster rendering or create historical schedules.
+- Preserve unrelated user files and browser state. Do not change account, shop, or live-room selection unless the configured schedule requires it.
+- Use the repository's virtual environment for Python development. Keep setup and operation documented for Windows/PowerShell.
+- Run focused validation after changes; report what was and was not verified against the live merchant portal.
+- Stop every project test service started by Codex as soon as validation finishes, including its child processes, and verify that its listening port is released before ending the task. Do not leave the backend running; the operator starts it manually. Preserve services that were already running before the test.
+
+## Repository conventions
+- Python source uses type hints, structured logging, explicit time zones (`Asia/Shanghai` for schedules), and small service boundaries.
+- Keep secrets out of source control; add new persisted configuration fields to the settings schema and operator documentation.
+- Update this file when project-wide implementation rules materially change.

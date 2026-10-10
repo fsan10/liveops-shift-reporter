@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1220">
+  <title>直播运营数据台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">L</span><span><strong>直播运营</strong><small>数据采集与报表</small></span></div>
+      <div class="shop-switch"><span class="live-dot"></span><span id="shop-name">店铺未配置</span><small id="browser-mode">连接中</small></div>
+      <nav class="nav" aria-label="主导航">
+        <button class="nav-item active" data-view="overview"><span class="nav-icon">◫</span>数据总览</button>
+        <button class="nav-item" data-view="schedules"><span class="nav-icon">▦</span>排班管理</button>
+        <button class="nav-item" data-view="reports"><span class="nav-icon">▤</span>数据明细</button>
+        <button class="nav-item" data-view="runs"><span class="nav-icon">◷</span>采集记录</button>
+        <button class="nav-item" data-view="collectors"><span class="nav-icon">⌘</span>采集脚本</button>
+        <button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span>系统配置</button>
+      </nav>
+      <div class="sidebar-bottom"><span class="status-pulse" id="app-status-dot"></span><span id="app-status-text">服务状态检查中</span><a href="/docs" target="_blank" rel="noreferrer">API 文档 ↗</a></div>
+    </aside>
+
+    <main class="main-area">
+      <header class="topbar">
+        <div><div class="eyebrow">LIVE COMMERCE · OPERATIONS</div><h1 id="page-title">数据总览</h1></div>
+        <div class="top-actions"><span class="connection-chip"><span class="status-pulse"></span><span id="connection-chip-text">本地服务已运行</span></span><button class="icon-button" id="refresh-button" title="刷新数据" aria-label="刷新数据">↻</button><div class="avatar">MO</div></div>
+      </header>
+
+      <section class="view active" id="view-overview">
+        <div class="page-intro"><div><h2>直播表现</h2><p>按主播排班汇总成交、流量和投放数据。</p></div><div class="toolbar"><div class="date-picker-control"><input id="overview-date" class="date-picker-native" type="hidden"><div data-antd-date="overview-date"></div></div><button class="button button-primary" id="go-schedules">＋ 新建排班</button></div></div>
+        <div class="kpi-grid" id="kpi-grid"></div>
+        <div class="content-grid overview-grid">
+          <article class="panel chart-panel"><div class="panel-heading"><div><h3>时段成交表现</h3><p>GMV 与整体成交额 · 元</p></div><span class="panel-note" id="chart-date"></span></div><div id="sales-chart" class="chart-wrap"></div></article>
+          <article class="panel"><div class="panel-heading"><div><h3>采集队列</h3><p>最近的自动采集与人工执行</p></div><button class="text-button" data-nav="runs">查看全部 ↗</button></div><div id="recent-runs" class="run-list"></div></article>
+        </div>
+        <article class="panel table-panel"><div class="panel-heading"><div><h3>今日排班</h3><p>主播时段、基线和采集状态</p></div><button class="text-button" data-nav="schedules">排班管理 ↗</button></div><div id="overview-schedules" class="table-scroll"></div></article>
+      </section>
+
+      <section class="view" id="view-schedules">
+        <iframe id="roster-frame" src="/static/roster.html?v=20261009-roster-menu" title="直播间排班" loading="eager"></iframe>
+      </section>
+
+      <section class="view" id="view-reports">
+        <div class="page-intro"><div><h2>数据明细</h2><p>原始接口数据、计算字段和页面截图可按每个时段追溯。</p></div><div class="toolbar"><div class="date-picker-control"><input id="reports-date" class="date-picker-native" type="hidden"><div data-antd-date="reports-date"></div></div><button class="button button-secondary" id="export-csv">导出 CSV</button></div></div>
+        <article class="panel table-panel"><div class="panel-heading"><div><h3>主播直播数据表</h3><p>展示与多维表格同步的 25 项指标。</p></div><span class="panel-note" id="report-count"></span></div><div id="report-table" class="table-scroll"></div><div id="reports-pagination" class="pagination-wrap"></div></article>
+      </section>
+
+      <section class="view" id="view-runs">
+        <div class="page-intro"><div><h2>采集记录</h2><p>查看每次自动采集、人工执行和基线任务的状态及详情。</p></div></div>
+        <article class="panel table-panel"><div class="panel-heading"><div><h3>采集运行记录</h3><p>点击记录查看执行结果、缺失字段和错误原因。</p></div><span class="panel-note" id="run-count"></span></div><div id="runs-table" class="table-scroll"></div><div id="runs-pagination" class="pagination-wrap"></div></article>
+      </section>
+
+      <section class="view" id="view-collectors">
+        <div class="page-intro"><div><h2>采集脚本</h2><p>管理页面采集步骤和截图方式。数据通过页面已登录会话读取 API 返回。</p></div><button class="button button-secondary" id="refresh-collectors">刷新脚本</button></div>
+        <div class="notice notice-amber"><strong>页面布局提示</strong><span>专业版截图前会切换到指定栏目；若罗盘改版，请在这里更新栏目名称或漏斗 XPath。整页截图按当前网页完整高度生成。</span></div>
+        <div id="collector-cards" class="collector-grid"></div>
+      </section>
+
+      <section class="view" id="view-settings">
+        <div class="page-intro"><div><h2>系统配置</h2><p>凭证加密保存在本机数据库。留空已配置的密钥不会覆盖现有值。</p></div><button class="button button-primary" id="save-settings">保存配置</button></div>
+        <div class="settings-grid">
+          <article class="panel settings-card"><div class="panel-heading"><div><h3>浏览器会话</h3><p>测试环境使用 Cloak Login CDP；正式运行可切换 Playwright 原生浏览器。</p></div></div>
+            <label>浏览器模式<select id="browser_mode"><option value="cloak_cdp">Cloak Login（自动连接）</option><option value="native">Playwright 原生浏览器</option></select></label>
+              <label>Cloak profile 名称<input id="cloak_profile_name" placeholder="例如 Douyin-Test-Profile"></label><small class="field-help">程序会自动查找或启动此 profile，并获取本次运行的浏览器连接地址。</small>
+              <label>Profile ID（可选）<input id="cloak_profile_id" placeholder="留空按名称查找"></label>
+            <label>原生浏览器数据目录<input id="native_user_data_dir" placeholder="var/native-browser-profile"></label>
+            <label>原生 Chromium 路径<input id="native_chromium_path" placeholder="留空使用 Playwright Chromium"></label>
+            <label>原生浏览器上下文参数（JSON）<textarea id="native_context_options" rows="4" spellcheck="false"></textarea></label>
+              <label>直播账号 ID（可选）<input id="live_author_id" placeholder="author_id；多个账号时必填"></label><label>直播间 ID（可选）<input id="live_room_id" placeholder="当天自动发现所有相关场次"></label><label>默认千川账户 ID<input id="qianchuan_account_id"></label><label>店铺名称<input id="shop_name"></label>
+          </article>
+          <article class="panel settings-card"><div class="panel-heading"><div><h3>飞书群机器人</h3><p>使用企业自建应用机器人，将报告说明和页面截图发到群聊。</p></div><span id="feishu-state" class="state-pill">未检查</span></div>
+            <label>App ID<input id="feishu_app_id" autocomplete="off"></label><label>App Secret<input id="feishu_app_secret" type="password" autocomplete="new-password" placeholder="未配置"></label><small class="field-help" id="secret-configured"></small>
+              <label>群聊 Chat ID<input id="feishu_chat_id" placeholder="oc_…"></label>
+              <label>登录/滑块负责人 Open ID<input id="feishu_alert_open_id" placeholder="ou_…；提醒时自动 @"></label>
+            <label>报告文字模板<textarea id="report_message_template" rows="2"></textarea></label><small class="field-help">可用变量：{host_name}、{promoter}、{date}、{start_time}、{end_time}、{duration_hours}、{gmv}、{overall_amount}、{overall_roi}</small>
+            <div class="button-row"><button class="button button-secondary" id="check-feishu">检查应用凭证</button><button class="button button-secondary" id="test-feishu">发送测试消息</button></div>
+          </article>
+          <article class="panel settings-card"><div class="panel-heading"><div><h3>飞书多维表格</h3><p>多维表格只保留本月热数据；完整历史持续保存在本地数据库。</p></div><span id="bitable-state" class="state-pill">未检查</span></div>
+            <label>多维表格 app_token<input id="bitable_app_token"></label><label>数据表 table_id<input id="bitable_table_id"></label><label>幂等键列名<input id="bitable_sync_key_field" placeholder="SourceID"></label>
+            <label>字段映射（JSON）<textarea id="bitable_field_mapping" rows="11" spellcheck="false"></textarea></label>
+            <div class="button-row"><button class="button button-secondary" id="check-bitable">检查表格权限</button><button class="button button-secondary" id="load-fields">读取表头</button></div><div id="bitable-fields" class="field-chips"></div>
+          </article>
+          <article class="panel settings-card"><div class="panel-heading"><div><h3>自动调度</h3><p>按服务本地时区运行；失败任务保留，可从排班页人工重试。</p></div></div>
+            <label>时区<input id="timezone-display" value="Asia/Shanghai" readonly></label><label>结束后等待（秒）<input id="settle_delay_seconds" type="number" min="0" max="3600"></label><label>错过时间后的补采窗口（分钟）<input id="auto_catchup_minutes" type="number" min="0" max="1440"></label>
+            <div class="notice notice-green"><strong>时间点自动化</strong><span>每个时段结束后自动采集；首位以 0 为基线，后续时段取上一位最后一次采集快照。停止服务期间错过的时段只会在补采窗口内尝试。</span></div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="detail-dialog" class="modal modal-wide"><div class="modal-heading"><div><span class="eyebrow">COLLECTION DETAIL</span><h2 id="detail-title">采集详情</h2></div><button type="button" class="icon-button" data-close-dialog aria-label="关闭">×</button></div><div id="detail-content" class="detail-content"></div></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js?v=20261009-roster-menu" defer></script>
+  <script src="/static/widgets.bundle.js" defer></script>
+</body>
+</html>

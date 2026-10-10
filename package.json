@@ -1,0 +1,16 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:widgets": "esbuild liveops/static/widgets.jsx --bundle --minify --format=iife --outfile=liveops/static/widgets.bundle.js"
+  },
+  "dependencies": {
+    "antd": "^6.0.0",
+    "dayjs": "^1.11.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

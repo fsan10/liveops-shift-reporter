@@ -1,0 +1,2395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>直播间排班</title>
+<style>
+  :root{
+    --primary:#4269ee; --primary-2:#5478f0; --primary-soft:#7895f6;
+    --ink:#14213a; --ink-2:#34435e; --muted:#8290a8; --line:#e9edf4;
+    --bg:#f5f7fb; --card:#FFFFFF;
+    --rest:#FED4A4; --shoot:#F9E5D7;
+    --green:#34C724; --danger:#F54A45; --warn:#FF8800; --info:#4E83FD;
+    --shadow:0 2px 10px rgba(31,35,41,.06); --shadow-lg:0 8px 30px rgba(31,35,41,.14);
+    --radius:12px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{min-height:100%;scrollbar-gutter:stable}
+  body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
+    min-height:100vh;background:var(--bg);color:var(--ink);font-size:14px;-webkit-font-smoothing:antialiased}
+  button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#cdc8d8;border-radius:8px;border:2px solid var(--bg)}
+  ::-webkit-scrollbar-thumb:hover{background:#b3aac4}
+
+  /* ============ 顶部栏 ============ */
+  .topbar{background:linear-gradient(120deg,#172744,#28478c 55%,#4269ee);color:#fff;
+    padding:0 24px;height:64px;display:flex;align-items:center;gap:18px;position:sticky;top:0;z-index:60;
+    box-shadow:0 2px 16px rgba(23,39,68,.18)}
+  .brand{display:flex;align-items:center;gap:12px;min-width:0}
+  .brand .logo{width:38px;height:38px;border-radius:10px;background:rgba(255,255,255,.18);
+    display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .brand h1{font-size:17px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .brand .sub{font-size:12px;opacity:.82;margin-top:2px}
+  .topbar .spacer{flex:1}
+  .search{position:relative;width:230px}
+  .search svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);opacity:.7}
+  .search input{width:100%;height:38px;border-radius:9px;border:1px solid rgba(255,255,255,.25);
+    background:rgba(255,255,255,.14);color:#fff;padding:0 12px 0 36px;font-size:13px;outline:none}
+  .search input::placeholder{color:rgba(255,255,255,.75)}
+  .search input:focus{background:rgba(255,255,255,.22);border-color:rgba(255,255,255,.5)}
+  .tbtn{height:38px;padding:0 14px;border-radius:9px;background:rgba(255,255,255,.14);
+    border:1px solid rgba(255,255,255,.22);display:inline-flex;align-items:center;gap:7px;
+    font-size:13px;color:#fff;transition:.15s;white-space:nowrap}
+  .tbtn:hover{background:rgba(255,255,255,.24)}
+  .tbtn.primary{background:#fff;color:var(--primary);font-weight:600;border-color:#fff}
+  .tbtn.primary:hover{background:#f3eeff}
+
+  /* ============ 视图切换 ============ */
+  .tabs{display:flex;background:var(--card);border-bottom:1px solid var(--line);padding:0 24px;
+    position:sticky;top:var(--roster-topbar-height,64px);z-index:50;gap:4}
+  .tab{padding:14px 18px;font-size:14px;color:var(--muted);font-weight:500;border-bottom:2px solid transparent;
+    display:flex;align-items:center;gap:8px;transition:.15s}
+  .tab:hover{color:var(--primary)}
+  .tab.active{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+  .tab .badge{font-size:11px;background:#efe9fc;color:var(--primary);padding:1px 7px;border-radius:10px}
+
+  /* ============ 概览卡片 ============ */
+  .stats{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;padding:20px 24px 4px}
+  .stat{background:var(--card);border-radius:var(--radius);padding:14px 16px;box-shadow:var(--shadow);
+    display:flex;align-items:center;gap:13px;border:1px solid #f0eef5}
+  .stat .ic{width:42px;height:42px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .stat .num{font-size:22px;font-weight:700;line-height:1.1}
+  .stat .lb{font-size:12px;color:var(--muted);margin-top:3px}
+
+  .layout{display:flex;gap:16px;padding:16px 24px 40px;align-items:flex-start}
+  .main{flex:1;min-width:0}
+
+  /* ============ 列表视图 ============ */
+  .day-card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:14px;
+    overflow:hidden;border:1px solid #f0eef5}
+  .day-head{display:flex;align-items:center;gap:12px;padding:11px 16px;background:linear-gradient(90deg,#f4efff,#faf8ff);
+    border-bottom:1px solid #efeaf8}
+  .day-date{display:flex;flex-direction:column;align-items:center;justify-content:center;
+    min-width:58px;background:var(--primary-soft);color:#fff;border-radius:10px;padding:6px 10px;line-height:1.15}
+  .day-date .d{font-size:20px;font-weight:700}
+  .day-date .w{font-size:11px;opacity:.92}
+  .day-meta{display:flex;gap:8px;flex-wrap:wrap;flex:1;align-items:center}
+  .holiday-tag{font-size:11px;font-weight:600;padding:3px 9px;border-radius:6px;background:#FFECE8;color:#D8392B}
+  .holiday-tag.legal{background:#FEE4A8;color:#9A6700}
+  .meta-chip{font-size:12px;display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:20px;cursor:pointer;transition:.13s;border:1px dashed transparent}
+  .meta-chip.rest{background:#FFF1E3;color:#B25B00;border-color:#ffd9b0}
+  .meta-chip.shoot{background:#FDEEE5;color:#9C5B30;border-color:#f6d3bd}
+  .meta-chip.empty{background:#f6f5f9;color:#9aa0aa;border-style:dashed}
+  .meta-chip:hover{filter:brightness(.97);border-color:var(--primary-soft)}
+  .meta-chip .plus{font-weight:700}
+  .day-add{font-size:12.5px;color:var(--primary);font-weight:600;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px}
+  .day-add:hover{background:#efe9fc}
+
+  table.grid{width:100%;border-collapse:collapse}
+  table.grid td{padding:0;border-bottom:1px solid #f0eef5;vertical-align:middle}
+  table.grid tr:last-child td{border-bottom:none}
+  .cell{height:46px;display:flex;align-items:center;justify-content:center;position:relative}
+  .c-time{background:#F2F7E8;color:#4D5A1F;font-weight:600;font-size:13px;cursor:pointer;gap:7px}
+  .c-time:hover{background:#E9F2D8}
+  .c-time .night{font-size:10px;background:#373C43;color:#fff;border-radius:4px;padding:1px 5px}
+  .person-cell{width:100%;height:100%;display:flex;align-items:center;justify-content:center;gap:8px;
+    cursor:pointer;font-size:13.5px;font-weight:600;position:relative;transition:filter .13s}
+  .person-cell:hover{filter:brightness(.94) saturate(1.05)}
+  .person-cell .edit-dot{position:absolute;right:8px;opacity:0;transition:.13s;color:rgba(0,0,0,.45)}
+  .person-cell:hover .edit-dot{opacity:1}
+  .avatar{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-size:11px;font-weight:700;flex-shrink:0;background:rgba(255,255,255,.55)}
+  .ops-cell{font-weight:500;color:#2c3e6b}
+  .ops-cell .avatar{background:rgba(255,255,255,.6)}
+  .empty-cell{color:#b6bcc6;font-size:12.5px;width:100%;height:100%;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer}
+  .empty-cell:hover{color:var(--primary);background:#faf7ff}
+  .merged{height:100%;width:100%;display:flex;align-items:center;justify-content:center;cursor:pointer}
+  .merged .rest-txt{font-size:13px;font-weight:600;color:#8a4a05;text-align:center;line-height:1.4;padding:6px}
+  .merged .shoot-txt{font-size:12.5px;color:#8a4a2a;text-align:center;line-height:1.4;padding:6px}
+  .merged.empty .rest-txt,.merged.empty .shoot-txt{color:#b6bcc6;font-weight:400}
+  .row-del{width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;
+    color:#b6bcc6;margin:auto;transition:.13s}
+  .row-del:hover{color:var(--danger);background:#feecec}
+  tr.shift-row.has-conflict .person-cell{outline:2px solid var(--danger);outline-offset:-2px;border-radius:6px}
+
+  /* ============ 周历视图 ============ */
+  .week{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:14px;overflow:hidden;border:1px solid #f0eef5}
+  .week-title{padding:10px 16px;font-size:13px;font-weight:600;color:var(--muted);background:#faf9fd;border-bottom:1px solid #f0eef5;display:flex;justify-content:space-between}
+  .week-grid{display:grid;grid-template-columns:repeat(7,1fr);min-height:150px}
+  .week-day{border-right:1px solid #f0eef5;padding:8px;display:flex;flex-direction:column;gap:6px;min-width:0}
+  .week-day:last-child{border-right:none}
+  .week-day.we{background:#fcfbfe}
+  .week-day.out{background:#f7f6f9}
+  .wd-head{display:flex;align-items:baseline;gap:6px}
+  .wd-head .n{font-size:15px;font-weight:700}
+  .wd-head .w{font-size:11px;color:var(--muted)}
+  .wd-head.out .n{color:#c2c6ce}
+  .wd-head.today .n{background:var(--primary);color:#fff;border-radius:6px;padding:0 6px}
+  .wd-legal{font-size:10px;color:#D8392B;font-weight:600}
+  .shift-card{border-radius:8px;padding:5px 7px;cursor:pointer;transition:.13s;border:1px solid rgba(0,0,0,.05)}
+  .shift-card:hover{transform:translateY(-1px);box-shadow:0 3px 10px rgba(0,0,0,.12)}
+  .shift-card .t{font-size:10.5px;font-weight:600;opacity:.78;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .shift-card .a{font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:4px}
+  .shift-card .o{font-size:10px;opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .shift-card.conflict{border:1.5px solid var(--danger)}
+  .wd-add{font-size:11px;color:#90a4bc;padding:5px;border-radius:6px;text-align:center;border:1px dashed #dbe5f1;display:block;opacity:.7}
+  .week-day:hover .wd-add,.wd-add:focus-visible{opacity:1}
+  .wd-add:hover,.wd-add:focus-visible{color:#6394c5;border-color:#b3d1f4;background:#f3f8ff;outline:none}
+
+  /* 历史日期保留人员配色，用灰白蒙版弱化；今日使用浅蓝色外扩柔光。 */
+  .history-days{margin-bottom:14px;border:1px solid #dfe4eb;border-radius:12px;background:#eef1f5;color:#788393}
+  .history-days>summary{padding:14px 16px;cursor:pointer;font-weight:600}
+  .history-days>summary small{margin-left:12px;font-weight:400}
+  .history-days[open]>summary{border-bottom:1px solid #dfe4eb}
+  .history-days .day-card{margin:10px}
+  .is-past{position:relative;isolation:isolate;cursor:not-allowed}
+  .is-past::after{content:"";position:absolute;inset:0;border-radius:inherit;
+    background:rgba(241,243,247,.48);z-index:5;cursor:not-allowed}
+  .is-past>*{pointer-events:none}
+  .is-past .edit-dot{display:none}
+  .is-past .person-cell,.is-past .empty-cell,.is-past .c-time,.is-past .shift-card,.is-past .meta-chip{
+    cursor:not-allowed;transform:none;filter:none;outline:none}
+  .is-today{position:relative;z-index:2;border:1px solid #b7d8fb;
+    box-shadow:0 0 0 1px rgba(190,220,253,.65),0 0 12px rgba(113,174,245,.28),
+    0 0 28px rgba(145,198,254,.22),0 0 48px rgba(169,215,255,.16)}
+  .is-today .day-date{background:#d9ebff;color:#5d83ad}
+  .week-day.is-today{border-radius:10px;background:#f7fbff}
+  .week.has-today{overflow:visible}
+  .wd-head.today .n{background:#d9ebff;color:#5d83ad}
+  .today-tag{font-size:11px;font-weight:700;color:#6596c5;background:#eaf5ff;padding:3px 7px;border-radius:6px}
+  .readonly-tag{font-size:11px;color:#85909f}
+  button:disabled{cursor:not-allowed}
+  .wd-add{width:100%}
+
+  /* ============ 侧栏统计 ============ */
+  .sidebar{width:288px;flex-shrink:0;position:sticky;top:calc(var(--roster-topbar-height,64px) + var(--roster-tabs-height,50px) + 12px);display:flex;flex-direction:column;gap:14px}
+  .panel{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);border:1px solid #f0eef5;overflow:hidden}
+  .panel-h{padding:13px 16px;font-size:13.5px;font-weight:700;border-bottom:1px solid #f0eef5;display:flex;align-items:center;gap:8px}
+  .panel-h .settings-trigger{margin-left:auto;width:26px;height:26px;display:grid;place-items:center;border-radius:7px;color:#8290a8}
+  .panel-h .settings-trigger:hover,.panel-h .settings-trigger[aria-expanded="true"]{background:#eef2ff;color:var(--primary)}
+  .panel-h .settings-trigger:focus-visible,.person-add:focus-visible,.person-remove:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+  .person-add{width:calc(100% - 28px);margin:0 14px 12px;padding:8px;border:1px dashed #b9c7f3;border-radius:7px;color:var(--primary);font-size:12px;font-weight:600;text-align:center}
+  .person-add:hover{background:#eef2ff}
+  .person-add[hidden]{display:none}
+  .person-remove{margin-left:2px;width:26px;height:26px;display:grid;place-items:center;flex-shrink:0;color:#9aa5b7;border-radius:6px}
+  .person-remove:hover{background:#fff0f0;color:var(--danger)}
+  .retired-tag{font-size:10px;color:#8f9aab;white-space:nowrap}
+  .panel-b{padding:10px 14px 14px;max-height:340px;overflow-y:auto}
+  .stat-row{display:flex;align-items:center;gap:9px;padding:6px 4px;cursor:pointer;border-radius:8px;transition:.12s}
+  .stat-row:hover{background:#f7f5fc}
+  .stat-row .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+  .stat-row .nm{font-size:13px;width:52px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .stat-row .bar{flex:1;height:7px;background:#f0edf7;border-radius:5px;overflow:hidden}
+  .stat-row .bar i{display:block;height:100%;border-radius:5px;transition:width .4s}
+  .stat-row .ct{font-size:12px;color:var(--muted);width:30px;text-align:right;flex-shrink:0;font-variant-numeric:tabular-nums}
+  .legend{padding:12px 16px;font-size:12px;color:var(--muted);line-height:1.9}
+  .legend .li{display:flex;align-items:center;gap:8px}
+  .legend .sw{width:14px;height:14px;border-radius:4px;flex-shrink:0}
+
+  /* 筛选高亮 */
+  body.filtering .person-cell,body.filtering .day-card,body.filtering .shift-card{opacity:.28}
+  body.filtering .person-cell.hl,body.filtering .shift-card.hl,body.filtering .day-card.has-hl{opacity:1}
+  body.filtering .shift-card.hl{box-shadow:0 0 0 2px var(--primary)}
+
+  /* ============ 弹层 ============ */
+  .mask{position:fixed;inset:0;background:rgba(31,35,41,.32);z-index:80;display:none;align-items:flex-start;justify-content:center}
+  .mask.show{display:flex;animation:fade .15s}
+  @keyframes fade{from{opacity:0}to{opacity:1}}
+  .popover{position:fixed;z-index:90;background:#fff;border-radius:12px;box-shadow:var(--shadow-lg);
+    width:248px;overflow:hidden;display:none;animation:pop .14s}
+  .popover.show{display:block}
+  @keyframes pop{from{transform:translateY(-4px);opacity:0}to{transform:translateY(0);opacity:1}}
+  .pop-search{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line)}
+  .pop-search input{flex:1;border:none;outline:none;font-size:13.5px}
+  .pop-list{max-height:240px;overflow-y:auto;padding:6px}
+  .pop-opt{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:8px;cursor:pointer;font-size:13.5px}
+  .pop-opt:hover{background:#f4f1fb}
+  .pop-opt.sel{background:#efe9fc;color:var(--primary);font-weight:600}
+  .pop-opt .sw{width:18px;height:18px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700}
+  .pop-opt .ck{margin-left:auto;color:var(--primary);display:none}
+  .pop-opt.sel .ck{display:block}
+  .pop-foot{display:flex;justify-content:space-between;padding:8px;border-top:1px solid var(--line);gap:8px}
+  .pop-foot button{font-size:12.5px;padding:6px 10px;border-radius:7px;color:var(--muted)}
+  .pop-foot button:hover{background:#f2f1f5}
+  .pop-foot .ok{background:var(--primary);color:#fff;font-weight:600}
+  .pop-foot .ok:hover{background:#5520b3}
+  .pop-hint{padding:7px 12px;font-size:11px;color:var(--muted);background:#faf9fd;border-top:1px solid #f0eef5}
+
+  /* 月历班次：一级字段菜单和紧邻的二级设置面板。 */
+  .shift-menu{display:none;position:fixed;z-index:95;width:230px;padding:7px;background:#fff;
+    border:1px solid #e5ebf4;border-radius:13px;box-shadow:0 12px 36px #22365920,0 2px 8px #2236590a}
+  .shift-menu.show{display:block;animation:pop .14s}
+  .shift-menu-heading{padding:7px 9px 10px;font-size:12px;color:#8995a7;border-bottom:1px solid #edf1f6;margin-bottom:4px}
+  .shift-menu-item{display:flex;align-items:center;gap:12px;width:100%;padding:11px 10px;border-radius:8px;text-align:left}
+  .shift-menu-item .field-name{width:30px;font-size:13px;color:#465871;flex-shrink:0}
+  .shift-menu-item strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:500;color:#8995a7}
+  .shift-menu-item .chevron{color:#b3c1d4;font-size:18px;line-height:1}
+  .shift-menu-item:hover,.shift-menu-item[aria-expanded="true"]{background:#f0f6ff}
+  .shift-menu-item:focus-visible,.shift-submenu button:focus-visible{outline:2px solid #a4caf6;outline-offset:-2px}
+  .shift-submenu{display:none;position:absolute;left:calc(100% + 7px);top:36px;width:300px;padding:14px;background:#fff;
+    border:1px solid #e5ebf4;border-radius:13px;box-shadow:0 12px 36px #22365920,0 2px 8px #2236590a;
+    max-height:calc(100dvh - 24px);overflow-y:auto}
+  .shift-submenu.show{display:block}
+  .shift-submenu.to-left{left:auto;right:calc(100% + 7px)}
+  .shift-submenu::before{content:"";position:absolute;right:100%;top:0;width:8px;height:100%}
+  .shift-submenu.to-left::before{right:auto;left:100%}
+  .shift-submenu h3{font-size:14px;font-weight:600;color:#465871;margin-bottom:12px}
+  .shift-submenu label{display:block;color:#8b98aa;font-size:12px;margin-bottom:6px}
+  .shift-submenu input{height:36px;width:100%;border:1px solid #dde6f2;border-radius:8px;padding:0 10px;font:inherit;font-size:13px;outline:none}
+  .shift-submenu input:focus{border-color:#a5caf5;box-shadow:0 0 0 3px #d9eaff66}
+  .shift-time-inputs{display:flex;align-items:center;gap:7px;margin-bottom:12px}
+  .shift-time-inputs input{min-width:0}
+  .shift-options{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px;max-height:220px;overflow:auto}
+  .shift-option{padding:9px 7px;font-size:12px;border:1px solid #e9eef6;border-radius:7px;color:#60718b;display:flex;align-items:center;gap:7px}
+  .shift-option:hover,.shift-option.selected{border-color:#c3dafa;background:#f1f7ff;color:#5982b2}
+  .shift-option .sw{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .shift-submenu-footer{display:flex;justify-content:flex-end;gap:7px;margin-top:12px;padding-top:10px;border-top:1px solid #edf1f6}
+  .shift-submenu-footer button{padding:7px 10px;font-size:12px;border-radius:7px;color:#8995a7}
+  .shift-submenu-footer .save{background:#e9f3ff;color:#5c89b8;font-weight:600}
+  .shift-submenu-empty{font-size:12px;color:#9aa6b7;padding:12px 0}
+  @media(max-width:650px){
+    .shift-menu{width:min(340px,calc(100vw - 24px));max-height:calc(100dvh - 24px);overflow:auto}
+    .shift-submenu,.shift-submenu.to-left{position:static;width:100%;box-shadow:none;margin-top:7px;border-radius:9px}
+    .shift-options{max-height:140px}
+  }
+  @media(prefers-reduced-motion:reduce){.shift-menu.show{animation:none}}
+
+  /* 时段编辑弹窗 */
+  .modal{background:#fff;border-radius:14px;width:380px;margin-top:14vh;box-shadow:var(--shadow-lg);overflow:hidden;animation:pop .16s}
+  .modal-h{padding:16px 18px;font-size:15px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
+  .modal-h .x{color:#9aa0aa;width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center}
+  .modal-h .x:hover{background:#f2f1f5}
+  .modal-b{padding:4px 18px 18px}
+  .field{margin-bottom:14px}
+  .field label{font-size:12.5px;color:var(--muted);display:block;margin-bottom:6px}
+  .field input{width:100%;height:40px;border:1px solid var(--line);border-radius:9px;padding:0 12px;font-size:14px;outline:none}
+  .field input:focus{border-color:var(--primary-soft);box-shadow:0 0 0 3px rgba(124,58,237,.12)}
+  .tpl-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+  .tpl{padding:9px;border:1px solid var(--line);border-radius:9px;font-size:12.5px;text-align:center;cursor:pointer;transition:.12s}
+  .tpl:hover,.tpl.sel{border-color:var(--primary);background:#f6f2ff;color:var(--primary);font-weight:600}
+  .modal-f{display:flex;gap:10px;justify-content:flex-end;padding-top:4px}
+  .btn{height:38px;padding:0 18px;border-radius:9px;font-size:13.5px;font-weight:600}
+  .btn.ghost{background:#f2f1f5;color:var(--ink-2)}
+  .btn.ghost:hover{background:#e8e6ee}
+  .btn.solid{background:var(--primary);color:#fff}
+  .btn.solid:hover{background:#5520b3}
+  .btn.danger{background:#feecec;color:var(--danger)}
+
+  /* toast */
+  .toast-wrap{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);z-index:120;display:flex;flex-direction:column;gap:9px;align-items:center}
+  .toast{background:#2c2438;color:#fff;padding:11px 18px;border-radius:10px;font-size:13px;box-shadow:var(--shadow-lg);
+    display:flex;align-items:center;gap:12px;animation:pop .18s}
+  .toast.warn{background:#8a4b00}.toast.err{background:#a01f1f}
+  .toast button{color:#cdb4ff;font-size:12.5px;font-weight:600}
+  .toast button:hover{color:#fff}
+
+  @media (max-width:1180px){
+    .stats{grid-template-columns:repeat(3,1fr)}
+    .layout{flex-direction:column}
+    .sidebar{order:-1;width:100%;position:static;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  }
+  .month-switch{display:flex;align-items:center;gap:5px;white-space:nowrap;font-size:13px}
+  .month-switch button{min-width:25px;height:30px;padding:0 5px;border-radius:6px;color:#fff;background:rgba(255,255,255,.13)}
+  .month-switch button:hover{background:rgba(255,255,255,.28)}
+  .month-switch strong{min-width:84px;text-align:center}
+  table.grid{table-layout:fixed}
+  table.grid td:nth-child(1){width:20%}table.grid td:nth-child(2),table.grid td:nth-child(3){width:22%}
+  table.grid td:nth-child(4){width:36%}
+  .row-actions{display:flex;align-items:center;justify-content:flex-end;gap:5px;padding:3px 8px;white-space:nowrap}
+  .row-action{padding:5px 7px;border:1px solid #e3e9f3;border-radius:6px;color:#52627e;background:white;font-size:11px}
+  .row-action:hover{color:var(--primary);background:#eef2ff;border-color:#b9c7f3}
+  .row-action:disabled{opacity:.5;cursor:default}
+  .row-status{font-size:11px;color:#0b956a;margin-right:auto}
+  .row-status.off{color:#97a3b6}.row-status.report{color:#526be0}
+  .day-date{background:#7895f6}.day-head{background:linear-gradient(90deg,#eef2ff,#f8faff);border-bottom-color:#e5ebfa}
+  .stat{border-color:#e9edf4}.stat-row:hover{background:#f2f5ff}.panel{border-color:#e9edf4}
+  .pop-opt:hover,.pop-opt.sel{background:#eef2ff}.pop-opt.sel,.pop-opt .ck{color:var(--primary)}
+  .pop-foot .ok:hover,.btn.solid:hover{background:#3459da}.tpl:hover,.tpl.sel{background:#eef2ff}
+  .toast button{color:#adc0ff}
+  @media(max-width:1450px){.topbar{position:sticky;flex-wrap:wrap;height:auto;min-height:64px;padding:10px 16px;gap:9px}}
+  @media(max-width:760px){.stats{grid-template-columns:repeat(2,1fr);padding:12px}.layout{padding:12px}.sidebar{grid-template-columns:1fr}.search{width:100%;order:8}.topbar .spacer{display:none}.month-switch{order:3}.tbtn{font-size:11px}.day-card{overflow-x:auto}table.grid{min-width:700px}.tabs{padding:0 9px}.tabs>span:last-child{display:none!important}}
+</style>
+</head>
+<body>
+
+<!-- 顶部 -->
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
+    </div>
+    <div>
+      <h1>直播间排班</h1>
+      <div class="sub" id="monthSub">2026年10月 · 点击班次中的选项直接修改</div>
+    </div>
+  </div>
+  <div class="spacer"></div>
+  <div class="month-switch"><button id="prevMonth" type="button" aria-label="上个月">‹</button><strong id="monthLabel">2026年10月</strong><button id="nextMonth" type="button" aria-label="下个月">›</button><button id="thisMonth" type="button">本月</button></div>
+  <div class="search">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+    <input id="searchInput" placeholder="搜索主播 / 投手 / 日期">
+  </div>
+  <button class="tbtn" id="autoBtn">✦ 自动排班</button>
+  <button class="tbtn" id="exportBtn">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+    导出排班
+  </button>
+  <button class="tbtn" id="resetBtn">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+    恢复原始
+  </button>
+</header>
+
+<!-- 视图切换 -->
+<nav class="tabs">
+  <button class="tab active" data-view="list">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+    班次列表
+  </button>
+    <button class="tab" data-view="week">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+    月历视图
+  </button>
+  <span style="flex:1"></span>
+  <span style="display:flex;align-items:center;font-size:12px;color:var(--muted);padding-bottom:2px">
+    <span style="width:8px;height:8px;border-radius:50%;background:var(--danger);display:inline-block;margin-right:6px"></span>
+    红色描边表示排班冲突，悬停人员可点击编辑
+  </span>
+</nav>
+
+<!-- 概览 -->
+<section class="stats" id="statsRow"></section>
+
+<div class="layout">
+  <main class="main" id="mainArea"></main>
+
+  <!-- 侧栏 -->
+  <aside class="sidebar">
+    <div class="panel">
+      <div class="panel-h">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
+        主播班次统计
+        <button class="settings-trigger" data-manage="anchor" type="button" aria-label="管理主播" aria-expanded="false" title="管理主播"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.86 1.86-.06-.06A1.7 1.7 0 0 0 16 18.4a1.7 1.7 0 0 0-1.2 1.57V20h-2.6v-.03A1.7 1.7 0 0 0 11 18.4a1.7 1.7 0 0 0-1.88.34l-.06.06-1.86-1.86.06-.06A1.7 1.7 0 0 0 7.6 15a1.7 1.7 0 0 0-1.57-1.2H6v-2.6h.03A1.7 1.7 0 0 0 7.6 10a1.7 1.7 0 0 0-.34-1.88L7.2 8.06 9.06 6.2l.06.06A1.7 1.7 0 0 0 11 6.6a1.7 1.7 0 0 0 1.2-1.57V5h2.6v.03A1.7 1.7 0 0 0 16 6.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 1.86 1.86-.06.06A1.7 1.7 0 0 0 19.4 10a1.7 1.7 0 0 0 1.57 1.2H21v2.6h-.03A1.7 1.7 0 0 0 19.4 15Z"/></svg></button>
+      </div>
+      <div class="panel-b" id="anchorStats"></div>
+      <button class="person-add" data-add-person="anchor" type="button" hidden>＋ 增加主播</button>
+    </div>
+    <div class="panel">
+      <div class="panel-h">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2" stroke-linecap="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/></svg>
+        投手班次统计
+        <button class="settings-trigger" data-manage="ops" type="button" aria-label="管理投手" aria-expanded="false" title="管理投手"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.86 1.86-.06-.06A1.7 1.7 0 0 0 16 18.4a1.7 1.7 0 0 0-1.2 1.57V20h-2.6v-.03A1.7 1.7 0 0 0 11 18.4a1.7 1.7 0 0 0-1.88.34l-.06.06-1.86-1.86.06-.06A1.7 1.7 0 0 0 7.6 15a1.7 1.7 0 0 0-1.57-1.2H6v-2.6h.03A1.7 1.7 0 0 0 7.6 10a1.7 1.7 0 0 0-.34-1.88L7.2 8.06 9.06 6.2l.06.06A1.7 1.7 0 0 0 11 6.6a1.7 1.7 0 0 0 1.2-1.57V5h2.6v.03A1.7 1.7 0 0 0 16 6.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 1.86 1.86-.06.06A1.7 1.7 0 0 0 19.4 10a1.7 1.7 0 0 0 1.57 1.2H21v2.6h-.03A1.7 1.7 0 0 0 19.4 15Z"/></svg></button>
+      </div>
+      <div class="panel-b" id="opsStats"></div>
+      <button class="person-add" data-add-person="ops" type="button" hidden>＋ 增加投手</button>
+    </div>
+    <div class="panel">
+      <div class="panel-h">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12V8H6a2 2 0 0 1 0-4h12v4"/><path d="M4 6v12a2 2 0 0 0 2 2h14v-4"/><circle cx="16" cy="14" r="2"/></svg>
+        休息 / 年假天数
+      </div>
+      <div class="panel-b" id="restStats"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-h">图例</div>
+      <div class="legend">
+        <div class="li"><span class="sw" style="background:#4269ee"></span>标题 / 表头</div>
+        <div class="li"><span class="sw" style="background:#7895f6"></span>日期（星期）</div>
+        <div class="li"><span class="sw" style="background:#F2F7E8"></span>时段（按班次模式着色）</div>
+        <div class="li"><span class="sw" style="background:#FED4A4"></span>当日休息人员</div>
+        <div class="li"><span class="sw" style="background:#F9E5D7"></span>日常拍摄安排</div>
+        <div class="li"><span class="sw" style="background:#fff;border:1.5px solid var(--danger)"></span>排班冲突</div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<!-- 时段编辑 Modal -->
+<div class="mask" id="timeMask">
+  <div class="modal">
+    <div class="modal-h">
+      编辑时段
+      <button class="x" data-close="timeMask">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-b">
+      <div class="field">
+        <label>时段（开始-结束，24小时制）</label>
+        <input id="timeInput" placeholder="如 7:00-11:30">
+      </div>
+      <div class="field">
+        <label>常用时段模板</label>
+        <div class="tpl-grid" id="tplGrid"></div>
+      </div>
+      <div class="modal-f">
+        <button class="btn ghost" data-close="timeMask">取消</button>
+        <button class="btn solid" id="timeSave">确定</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<div class="mask" id="interruptMask" role="dialog" aria-modal="true" aria-labelledby="interruptTitle">
+  <div class="modal">
+    <div class="modal-h"><span id="interruptTitle">标记直播中断</span><button class="x" data-close="interruptMask" aria-label="关闭">×</button></div>
+    <div class="modal-b">
+      <p id="interruptShift"></p>
+      <div class="field"><label for="interruptTime">中断时间</label><input id="interruptTime" type="datetime-local" step="1"></div>
+      <p style="color:var(--muted);line-height:1.7">立即采集并保存旧场片段。班次结束时合并新场数据，新场从零开始；下一班继承新场结束快照。同一场重试会替换原片段。</p>
+      <div id="interruptHistory"></div>
+      <div class="modal-f"><button class="btn ghost" data-close="interruptMask">取消</button><button class="btn solid" id="interruptSave">标记并采集</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- 人员选择弹层（动态定位） -->
+<div class="popover" id="pop">
+  <div class="pop-search">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9aa0aa" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+    <input id="popSearch" placeholder="搜索或输入姓名">
+  </div>
+  <div class="pop-list" id="popList"></div>
+  <div class="pop-foot">
+    <button id="popClear">清除</button>
+    <button class="ok" id="popOk">确定</button>
+  </div>
+  <div class="pop-hint" id="popHint"></div>
+</div>
+
+<div class="shift-menu" id="shiftMenu" role="menu" aria-label="班次设置">
+  <div class="shift-menu-heading" id="shiftMenuHeading"></div>
+  <button class="shift-menu-item" role="menuitem" data-shift-field="time" aria-haspopup="true" aria-expanded="false">
+    <span class="field-name">时段</span><strong></strong><span class="chevron" aria-hidden="true">›</span>
+  </button>
+  <button class="shift-menu-item" role="menuitem" data-shift-field="anchor" aria-haspopup="true" aria-expanded="false">
+    <span class="field-name">主播</span><strong></strong><span class="chevron" aria-hidden="true">›</span>
+  </button>
+  <button class="shift-menu-item" role="menuitem" data-shift-field="ops" aria-haspopup="true" aria-expanded="false">
+    <span class="field-name">投手</span><strong></strong><span class="chevron" aria-hidden="true">›</span>
+  </button>
+  <div class="shift-submenu" id="shiftSubmenu" role="group" aria-label="字段设置"></div>
+</div>
+
+<script>
+/* ================= 数据 ================= */
+const RAW = {
+ "title": "示例排班模板（2026年10月）",
+ "days": [
+  {
+   "weekday": "星期四",
+   "date": "2026/10/1",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期五",
+   "date": "2026/10/2",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期六",
+   "date": "2026/10/3",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期日",
+   "date": "2026/10/4",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期一",
+   "date": "2026/10/5",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期二",
+   "date": "2026/10/6",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期三",
+   "date": "2026/10/7",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期四",
+   "date": "2026/10/8",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期五",
+   "date": "2026/10/9",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期六",
+   "date": "2026/10/10",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期日",
+   "date": "2026/10/11",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期一",
+   "date": "2026/10/12",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期二",
+   "date": "2026/10/13",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期三",
+   "date": "2026/10/14",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期四",
+   "date": "2026/10/15",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期五",
+   "date": "2026/10/16",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期六",
+   "date": "2026/10/17",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期日",
+   "date": "2026/10/18",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期一",
+   "date": "2026/10/19",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期二",
+   "date": "2026/10/20",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期三",
+   "date": "2026/10/21",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期四",
+   "date": "2026/10/22",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期五",
+   "date": "2026/10/23",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期六",
+   "date": "2026/10/24",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期日",
+   "date": "2026/10/25",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期一",
+   "date": "2026/10/26",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期二",
+   "date": "2026/10/27",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期三",
+   "date": "2026/10/28",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期四",
+   "date": "2026/10/29",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期五",
+   "date": "2026/10/30",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  },
+  {
+   "weekday": "星期六",
+   "date": "2026/10/31",
+   "rest": "",
+   "shoot": "",
+   "shifts": [
+    {
+     "time": "09:00-12:00",
+     "anchor": "示例主播A",
+     "ops": "示例投手A"
+    },
+    {
+     "time": "12:00-15:00",
+     "anchor": "示例主播B",
+     "ops": "示例投手B"
+    },
+    {
+     "time": "15:00-18:00",
+     "anchor": "示例主播C",
+     "ops": "示例投手C"
+    },
+    {
+     "time": "18:00-21:00",
+     "anchor": "示例主播D",
+     "ops": "示例投手D"
+    }
+   ]
+  }
+ ]
+};
+
+const DEFAULT_ANCHORS = ["示例主播A","示例主播B","示例主播C","示例主播D"];
+const DEFAULT_PROMOTERS = ["示例投手A","示例投手B","示例投手C","示例投手D"];
+let ANCHOR_POOL = [...DEFAULT_ANCHORS];
+let OPS_POOL = [...DEFAULT_PROMOTERS];
+const allPeople = () => [...new Set([...ANCHOR_POOL,...OPS_POOL])];
+
+/* 人员配色 */
+const PERSON_COLORS = {};
+const TIME_TEMPLATES = ["6:00-10:00","7:00-11:30","10:00-14:00","11:30-16:00","14:00-18:00",
+  "16:00-20:30","18:00-22:00","20:30-01:00","22:00-02:00"];
+const HOLIDAY = new Set(["2026/10/1","2026/10/2","2026/10/3","2026/10/4","2026/10/5","2026/10/6","2026/10/7"]);
+const LEGAL = new Set(["2026/10/1","2026/10/2","2026/10/3"]);
+function todayIso(){return new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Shanghai'});}
+let currentMonth = todayIso().slice(0,7);
+const STORE_KEY = () => `live_schedule_drafts_${currentMonth}`;
+function emptyMonth(month){
+  const [year, monthNumber] = month.split('-').map(Number);
+  const count = new Date(year, monthNumber, 0).getDate();
+  const weekdays = ['星期日','星期一','星期二','星期三','星期四','星期五','星期六'];
+  return {title:`${year}年${monthNumber}月直播间排班`,days:Array.from({length:count},(_,i)=>{
+    const date = new Date(year,monthNumber-1,i+1);
+    return {weekday:weekdays[date.getDay()],date:`${year}/${monthNumber}/${i+1}`,rest:'',shoot:'',shifts:[]};
+  })};
+}
+
+/* ================= 状态 ================= */
+let data = loadData();
+let serverData = emptyMonth(currentMonth);
+let syncPromise = Promise.resolve();
+let view = "list";
+let filterPerson = null;   // 侧栏/搜索点选的筛选
+let searchQ = "";
+let undoSnap = null;       // 单次撤销快照
+let popCtx = null;         // 当前弹层编辑上下文
+let historyExpanded = false;
+let remoteLoadSequence = 0;
+const manageOpen = {anchor:false,ops:false};
+
+function clone(o){return JSON.parse(JSON.stringify(o))}
+function loadData(){
+  return emptyMonth(currentMonth);
+}
+let saveTimer=null;
+function showRosterStatus(message){
+  if(window.parent!==window) window.parent.postMessage({type:'liveops:roster-status',text:message},location.origin);
+}
+function save(){
+  clearTimeout(saveTimer);
+  saveTimer=setTimeout(()=>{
+    try{localStorage.setItem(STORE_KEY(),JSON.stringify(data.days.map(day=>({date:day.date,shifts:day.shifts.filter(shift=>!shift.id)}))));
+      showRosterStatus("已保存 · "+new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}));
+    }catch(e){}
+  },250);
+}
+function snapshotUndo(){undoSnap=clone(data);}
+async function request(path,options={}){
+  const response=await fetch(path,{headers:{'Content-Type':'application/json'},...options});
+  const result=await response.json().catch(()=>({}));
+  if(!response.ok){const error=new Error(result.detail||`请求失败 (${response.status})`);error.status=response.status;throw error;}
+  return result;
+}
+const PENDING_PEOPLE_KEY='liveops_roster_people_pending_v1';
+function parsePeople(value,fallback){
+  try{const people=JSON.parse(value);return Array.isArray(people)&&people.every(name=>typeof name==='string')?people:fallback;}catch{return fallback;}
+}
+function pendingPeople(){
+  try{const value=JSON.parse(localStorage.getItem(PENDING_PEOPLE_KEY)||'null');return value&&Array.isArray(value.anchor)&&Array.isArray(value.ops)?value:null;}catch{return null;}
+}
+function applyPeople(anchor,ops){ANCHOR_POOL=[...anchor];OPS_POOL=[...ops];renderSidebar();}
+async function loadPeople(){
+  const {settings}=await request('/api/settings');
+  const pending=pendingPeople();
+  if(typeof settings.roster_anchor_pool!=='string'||typeof settings.roster_promoter_pool!=='string'){
+    if(pending)applyPeople(pending.anchor,pending.ops);
+    return;
+  }
+  const anchors=parsePeople(settings.roster_anchor_pool,DEFAULT_ANCHORS);
+  const promoters=parsePeople(settings.roster_promoter_pool,DEFAULT_PROMOTERS);
+  if(pending&&JSON.stringify(anchors)===JSON.stringify(DEFAULT_ANCHORS)&&JSON.stringify(promoters)===JSON.stringify(DEFAULT_PROMOTERS)){
+    try{
+      await request('/api/settings',{method:'PUT',body:JSON.stringify({values:{roster_anchor_pool:JSON.stringify(pending.anchor),roster_promoter_pool:JSON.stringify(pending.ops)}})});
+      localStorage.removeItem(PENDING_PEOPLE_KEY);applyPeople(pending.anchor,pending.ops);return;
+    }catch{applyPeople(pending.anchor,pending.ops);return;}
+  }
+  localStorage.removeItem(PENDING_PEOPLE_KEY);
+  applyPeople(anchors,promoters);
+}
+async function savePeople(field,names){
+  const anchors=field==='anchor'?names:ANCHOR_POOL;
+  const promoters=field==='ops'?names:OPS_POOL;
+  const values={roster_anchor_pool:JSON.stringify(anchors),roster_promoter_pool:JSON.stringify(promoters)};
+  try{await request('/api/settings',{method:'PUT',body:JSON.stringify({values})});localStorage.removeItem(PENDING_PEOPLE_KEY);}
+  catch(error){
+    if(error.status!==422||!error.message.includes('未知设置项'))throw error;
+    localStorage.setItem(PENDING_PEOPLE_KEY,JSON.stringify({anchor:anchors,ops:promoters}));
+    toast('名单已暂存此浏览器；服务重启后自动同步');
+  }
+  applyPeople(anchors,promoters);
+}
+function iso(day){const [y,m,d]=day.date.split('/');return `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;}
+function isPastDay(day){return iso(day)<todayIso();}
+function ensureEditableDay(day){
+  if(!day)return false;
+  if(isPastDay(day)){toast('历史日期的排班只读，不能新增或修改','warn');return false;}
+  return true;
+}
+function editAttrs(day,kind,si,field){
+  if(isPastDay(day))return 'aria-disabled="true"';
+  return `role="button" tabindex="0" data-edit="${kind}" data-day="${dayNum(day)}"${si==null?'':` data-shift="${si}"`}${field?` data-field="${field}"`:''}`;
+}
+function focusToday(){
+  requestAnimationFrame(()=>{
+    updateStickyOffsets();
+    const target=document.querySelector('#mainArea .is-today');
+    if(!target||!target.getClientRects().length)return;
+    const offset=rosterTopbar.getBoundingClientRect().height+rosterTabs.getBoundingClientRect().height+16;
+    window.scrollTo({top:Math.max(0,window.scrollY+target.getBoundingClientRect().top-offset),behavior:'instant'});
+  });
+}
+async function openCurrentRoster(){
+  closeShiftMenu();closePop();closeTime();
+  historyExpanded=false;filterPerson=null;searchQ='';document.getElementById('searchInput').value='';
+  if(currentMonth!==todayIso().slice(0,7)){await setMonth(0);return;}
+  await syncPromise;
+  await loadRemote({focus:true});
+}
+function shiftPayload(day,shift){
+  const [start,end]=(shift.time||'').split('-');
+  return {work_date:iso(day),start_time:start,end_time:end,host_name:shift.anchor,
+    promoter:shift.ops||'',shop_name:shift.shop_name||'',live_room_id:shift.live_room_id||'',
+    qianchuan_account_id:shift.qianchuan_account_id||'',message_template:shift.message_template||'',enabled:shift.enabled!==false};
+}
+function persistDrafts(){
+  try{localStorage.setItem(STORE_KEY(),JSON.stringify(data.days.map(day=>({date:day.date,shifts:day.shifts.filter(shift=>!shift.id)}))));}catch(e){}
+}
+function removeAccidentalOctoberFirstDrafts(rows){
+  // Only the explicitly reported accidental, entirely empty local shift is removed.
+  // Persisted shifts and drafts with any operator input remain untouched.
+  let removed=0;
+  const cleaned=rows.map(day=>{
+    if(day.date!=='2026/10/1'||!Array.isArray(day.shifts))return day;
+    const shifts=day.shifts.filter(shift=>{
+      const accidental=shift&&!shift.id&&['time','anchor','ops'].every(field=>!String(shift[field]||'').trim());
+      if(accidental)removed++;
+      return !accidental;
+    });
+    return {...day,shifts};
+  });
+  return {rows:cleaned,removed};
+}
+async function loadRemote({focus=false}={}){
+  const sequence=++remoteLoadSequence;
+  const loadedMonth=currentMonth;
+  const [year,month]=currentMonth.split('-');
+  const result=await request(`/api/schedules?year=${year}&month=${month}`);
+  if(sequence!==remoteLoadSequence||loadedMonth!==currentMonth)return;
+  const fresh=emptyMonth(currentMonth);
+  const byDate=new Map(fresh.days.map(day=>[iso(day),day]));
+  for(const [date,notes] of Object.entries(result.days||{})){
+    const day=byDate.get(date);if(day){day.rest=notes.rest||'';day.shoot=notes.shoot||'';}
+  }
+  for(const row of result.items||[]){
+    const day=byDate.get(row.work_date);if(!day)continue;
+    day.shifts.push({id:row.id,time:`${row.start_time.slice(0,5)}-${row.end_time.slice(0,5)}`,
+      anchor:row.host_name,ops:row.promoter||row.ops||'',enabled:row.enabled,report_id:row.report_id,interruptions:row.interruptions||[],
+      shop_name:row.shop_name,live_room_id:row.live_room_id,qianchuan_account_id:row.qianchuan_account_id,
+      message_template:row.message_template});
+  }
+  serverData=clone(fresh);
+  try{
+    const storedRows=JSON.parse(localStorage.getItem(STORE_KEY())||'[]');
+    const {rows:draftRows,removed}=removeAccidentalOctoberFirstDrafts(storedRows);
+    if(removed){localStorage.setItem(STORE_KEY(),JSON.stringify(draftRows));toast('已删除 10 月 1 日误加的空班次');}
+    for(const draftDay of draftRows){
+      const day=fresh.days.find(item=>item.date===draftDay.date);
+      if(day)day.shifts.push(...(draftDay.shifts||[]).filter(shift=>!shift.id));
+    }
+  }catch(e){}
+  closeShiftMenu();data=fresh;renderAll();updateMonthHeader();
+  if(focus)focusToday();
+  showRosterStatus('已连接排班数据');
+}
+function updateMonthHeader(){
+  const [year,month]=currentMonth.split('-').map(Number);
+  document.getElementById('monthLabel').textContent=`${year}年${month}月`;
+  document.getElementById('monthSub').textContent=`${year}年${month}月 · 点击班次中的选项直接修改`;
+  for(const id of ['autoBtn','resetBtn']){
+    const button=document.getElementById(id);
+    button.disabled=currentMonth<todayIso().slice(0,7);
+    button.title=button.disabled?'历史月份只读':'';
+  }
+}
+function syncData(){
+  syncPromise=syncPromise.then(async()=>{
+    while(true){
+      let change=null;
+      for(let i=0;i<data.days.length&&!change;i++){
+        const day=data.days[i],saved=serverData.days[i];
+        if(!saved)break;
+        // Retained historical drafts are visible for audit, never sent as new schedules.
+        if(isPastDay(day))continue;
+        if(day.rest!==saved.rest||day.shoot!==saved.shoot){
+          const rest=day.rest,shoot=day.shoot;
+          change=async()=>{await request(`/api/schedule-days/${iso(day)}`,{method:'PUT',body:JSON.stringify({rest,shoot})});saved.rest=rest;saved.shoot=shoot;};break;
+        }
+        for(const old of saved.shifts){
+          if(!day.shifts.some(item=>item.id===old.id)){
+            change=async()=>{await request(`/api/schedules/${old.id}`,{method:'DELETE'});saved.shifts=saved.shifts.filter(item=>item.id!==old.id);};break;
+          }
+        }
+        if(change)break;
+        for(const shift of day.shifts){
+          if(!shift.time||!shift.anchor)continue;
+          const old=shift.id?saved.shifts.find(item=>item.id===shift.id):null;
+          if(!shift.id){
+            const next=clone(shift);
+            change=async()=>{const result=await request('/api/schedules',{method:'POST',body:JSON.stringify(shiftPayload(day,next))});shift.id=result.item.id;saved.shifts.push({...next,id:result.item.id});persistDrafts();};break;
+          }
+          if(old&&['time','anchor','ops'].some(key=>old[key]!==shift[key])){
+            const next=clone(shift);
+            change=async()=>{await request(`/api/schedules/${shift.id}`,{method:'PUT',body:JSON.stringify(shiftPayload(day,next))});Object.assign(old,next);};break;
+          }
+        }
+      }
+      if(!change)break;
+      await change();
+    }
+    persistDrafts();renderAll();showRosterStatus('已同步到排班数据');
+  }).catch(async error=>{
+    toast(error.message||String(error),'err');
+    await loadRemote().catch(err=>toast(err.message||String(err),'err'));
+  });
+  return syncPromise;
+}
+async function setMonth(delta){
+  closeShiftMenu();closePop();closeTime();
+  clearTimeout(saveTimer);persistDrafts();await syncPromise;
+  const [year,month]=currentMonth.split('-').map(Number);
+  const next=new Date(year,month-1+delta,1);
+  currentMonth=delta===0?todayIso().slice(0,7):`${next.getFullYear()}-${String(next.getMonth()+1).padStart(2,'0')}`;
+  historyExpanded=false;
+  filterPerson=null;searchQ='';document.getElementById('searchInput').value='';
+  data=emptyMonth(currentMonth);serverData=emptyMonth(currentMonth);renderAll();updateMonthHeader();
+  await loadRemote({focus:true});
+  if(currentMonth!==todayIso().slice(0,7))window.scrollTo(0,0);
+}
+
+/* ================= 工具 ================= */
+function colorOf(name){return PERSON_COLORS[name]||"#D8D4E2";}
+function textOn(hex){ // 根据底色返回黑/白字
+  const h=hex.replace('#','');
+  const r=parseInt(h.substr(0,2),16),g=parseInt(h.substr(2,2),16),b=parseInt(h.substr(4,2),16);
+  const lum=(0.299*r+0.587*g+0.114*b)/255;
+  return lum>0.62?"#2B2F36":"#fff";
+}
+function initial(name){return name?name.slice(0,1):"?";}
+const NON_PERSON=new Set(["年假","休息","调休","法定","请假","事假","病假","补班"]);
+function splitPeople(s){return (s||"").split('/').map(x=>x.replace(/【.*?】/g,'').trim())
+  .filter(x=>x&&!NON_PERSON.has(x));}
+function dayNum(d){return parseInt(d.date.split('/')[2],10);}
+function isNight(time){return /01:00|02:00/.test(time);}
+function esc(s){return (s||"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+/* 冲突检测：返回某天的冲突信息 */
+function dayConflicts(day){
+  const issues=[];
+  const anchors=day.shifts.map(s=>s.anchor).filter(Boolean);
+  const restSet=splitPeople(day.rest);
+  day.shifts.forEach((s,i)=>{
+    if(s.anchor && anchors.filter(a=>a===s.anchor).length>1)
+      issues.push({shift:i,msg:`主播「${s.anchor}」当天重复排班`});
+    if(s.anchor && s.ops && s.anchor===s.ops)
+      issues.push({shift:i,msg:`「${s.anchor}」不能同时担任主播与投手`});
+    if(s.anchor && restSet.includes(s.anchor))
+      issues.push({shift:i,msg:`「${s.anchor}」当天休息，却排了主播`});
+    if(!s.time||!s.anchor)
+      issues.push({shift:i,msg:"时段或主播未填写完整",warn:true});
+  });
+  return issues;
+}
+function conflictShiftSet(day){return new Set(dayConflicts(day).map(x=>x.shift));}
+
+/* ================= 渲染：概览 ================= */
+function renderStats(){
+  const totalShifts=data.days.reduce((a,d)=>a+d.shifts.length,0);
+  const anchors=new Set(); data.days.forEach(d=>d.shifts.forEach(s=>s.anchor&&anchors.add(s.anchor)));
+  const ops=new Set(); data.days.forEach(d=>d.shifts.forEach(s=>s.ops&&ops.add(s.ops)));
+  const restDays=data.days.filter(d=>d.rest).length;
+  const fiveShift=data.days.filter(d=>d.shifts.length===5).length;
+  const cards=[
+    {n:data.days.length,l:"排班天数",c:"#4269ee",ic:'<path d="M3 9h18M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/>'},
+    {n:totalShifts,l:"总直播班次",c:"#3FC1A0",ic:'<rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8"/>'},
+    {n:anchors.size,l:"在岗主播",c:"#FF8C42",ic:'<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/>'},
+    {n:ops.size,l:"投手人数",c:"#4E83FD",ic:'<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>'},
+    {n:fiveShift,l:"5班次日",c:"#9B5DE5",ic:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'}
+  ];
+  document.getElementById('statsRow').innerHTML=cards.map(k=>`
+    <div class="stat">
+      <div class="ic" style="background:${k.c}1e">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="${k.c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${k.ic}</svg>
+      </div>
+      <div><div class="num">${k.n}</div><div class="lb">${k.l}</div></div>
+    </div>`).join('');
+}
+
+/* ================= 渲染：列表视图 ================= */
+function personCellHTML(day,si,field,pool){
+  const s=day.shifts[si]; const val=s[field];
+  const cls=field==='anchor'?'':'ops-cell';
+  if(val){
+    const c=colorOf(val);
+    return `<div class="person-cell ${cls}" ${editAttrs(day,'person',si,field)} style="background:${c};color:${textOn(c)}">
+      <span class="avatar" style="color:${textOn(c)}">${initial(val)}</span>
+      <span>${esc(val)}</span>
+      <span class="edit-dot"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg></span>
+    </div>`;
+  }
+  return `<div class="empty-cell" ${editAttrs(day,'person',si,field)}>
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>选择${field==='anchor'?'主播':'投手'}</div>`;
+}
+
+function renderList(){
+  const q=searchQ.trim();
+  let html="",historyHtml="";
+  const pastDays=data.days.filter(isPastDay);
+  data.days.forEach(day=>{
+    const conf=conflictShiftSet(day);
+    const n=dayNum(day);
+    const past=isPastDay(day),today=iso(day)===todayIso();
+    const tags=[];
+    if(LEGAL.has(day.date)) tags.push(`<span class="holiday-tag legal">法定节假日</span>`);
+    else if(HOLIDAY.has(day.date)) tags.push(`<span class="holiday-tag">国庆假期</span>`);
+    const restChip = day.rest
+      ? `<span class="meta-chip rest" ${editAttrs(day,'dayfield',null,'rest')}>
+           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>休息：${esc(day.rest)}</span>`
+      : `<span class="meta-chip empty" ${editAttrs(day,'dayfield',null,'rest')}><span class="plus">+</span> 设置休息</span>`;
+    const shootChip = day.shoot
+      ? `<span class="meta-chip shoot" ${editAttrs(day,'dayfield',null,'shoot')}>拍摄：${esc(day.shoot)}</span>`
+      : `<span class="meta-chip empty" ${editAttrs(day,'dayfield',null,'shoot')}><span class="plus">+</span> 日常拍摄</span>`;
+
+    let rows="";
+    day.shifts.forEach((s,si)=>{
+      rows+=`<tr class="shift-row ${conf.has(si)?'has-conflict':''}" data-day="${n}" data-shift="${si}">
+        <td>
+          <div class="cell c-time" ${editAttrs(day,'time',si)}>
+            ${s.time?esc(s.time):'<span style="color:#F54A45">未设置时段</span>'}
+            ${isNight(s.time)?'<span class="night">夜</span>':''}
+          </div>
+        </td>
+        <td>${personCellHTML(day,si,'anchor')}</td>
+        <td>${personCellHTML(day,si,'ops')}</td>
+        <td><div class="row-actions"><span class="row-status ${s.report_id?'report':s.enabled===false?'off':''}">${s.report_id?'已采集':s.id?(s.enabled===false?'已停用':'已启用'):'未完成'}</span><button class="row-action" data-action="run" data-day="${n}" data-shift="${si}" ${s.id&&s.enabled!==false&&iso(day)===todayIso()?'':'disabled title="仅当天排班可以手动采集"'}>开始采集</button>${interruptButtonHTML(day,s,n,si)}<button class="row-action" data-action="toggle" data-day="${n}" data-shift="${si}" ${s.id&&!past?'':'disabled'}>${s.enabled===false?'启用':'停用'}</button><button class="row-action" data-action="delete" data-day="${n}" data-shift="${si}" ${past?'disabled title="历史排班只读"':s.report_id?'disabled title="已有采集报告，请停用"':''}>删除</button></div></td>
+      </tr>`;
+    });
+
+    const dayMatch = !q || day.date.includes(q)||day.weekday.includes(q)||day.rest.includes(q)||day.shoot.includes(q)
+      ||day.shifts.some(s=>(s.anchor||"").includes(q)||(s.ops||"").includes(q));
+    const hasHl = filterPerson && day.shifts.some(s=>s.anchor===filterPerson||s.ops===filterPerson)||splitPeople(day.rest).includes(filterPerson)||splitPeople(day.shoot).includes(filterPerson);
+
+    const card=`<section class="day-card ${hasHl?'has-hl':''} ${past?'is-past':''} ${today?'is-today':''}" data-daycard="${n}" data-date="${iso(day)}" ${today?'aria-current="date"':''} style="${q&&!dayMatch?'display:none':''}">
+      <div class="day-head">
+        <div class="day-date"><span class="d">${n}</span><span class="w">${day.weekday}</span></div>
+        <div class="day-meta">${today?'<span class="today-tag">今天</span>':''}${past?'<span class="readonly-tag">历史 · 只读</span>':''}${tags.join('')}${restChip}${shootChip}</div>
+        <button class="day-add" data-add="shift" data-day="${n}" ${past?'disabled title="历史日期不能添加班次"':''}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          添加班次
+        </button>
+      </div>
+      <table class="grid"><tbody>${rows}</tbody></table>
+    </section>`;
+    if(past)historyHtml+=card;else html+=card;
+  });
+  const history=pastDays.length?`<details class="history-days" ${historyExpanded||q?'open':''}>
+    <summary>历史排班 · ${dayNum(pastDays[0])}–${dayNum(pastDays.at(-1))} 日<small>${pastDays.reduce((count,day)=>count+day.shifts.length,0)} 个班次 · 只读 · 展开查看</small></summary>${historyHtml}</details>`:'';
+  document.getElementById('mainArea').innerHTML=history+html;
+  document.querySelector('.history-days')?.addEventListener('toggle',event=>{historyExpanded=event.target.open;});
+}
+
+/* ================= 渲染：周历视图 ================= */
+function renderWeek(){
+  const byDay={}; data.days.forEach(d=>byDay[dayNum(d)]=d);
+  const [year,month]=currentMonth.split('-').map(Number);
+  const offset=(new Date(year,month-1,1).getDay()+6)%7;
+  const cells=[];
+  for(let i=0;i<offset;i++) cells.push({out:true});
+  for(let n=1;n<=data.days.length;n++) cells.push({day:n});
+  while(cells.length%7!==0) cells.push({out:true,after:true});
+  const weeks=[];
+  for(let i=0;i<cells.length;i+=7) weeks.push(cells.slice(i,i+7));
+  const wdNames=["周一","周二","周三","周四","周五","周六","周日"];
+
+  let html="";
+  weeks.forEach((wk,wi)=>{
+    const inDays=wk.filter(c=>c.day).map(c=>c.day);
+    const range=inDays.length?`${Math.min(...inDays)} – ${Math.max(...inDays)} 日`:"";
+    let grid="";
+    wk.forEach((c,idx)=>{
+      const we=idx>=5;
+      if(c.out){
+        grid+=`<div class="week-day out ${we?'we':''}"><div class="wd-head"><span class="n">·</span></div></div>`;
+        return;
+      }
+      const day=byDay[c.day]; const conf=conflictShiftSet(day);
+      const past=isPastDay(day),today=iso(day)===todayIso();
+      const cards=day.shifts.map((s,si)=>{
+        const col=s.anchor?colorOf(s.anchor):"#eee";
+        const hl=(filterPerson&&(s.anchor===filterPerson||s.ops===filterPerson))?'hl':'';
+        return `<div class="shift-card ${conf.has(si)?'conflict':''} ${hl}" style="background:${col}22;border-left:3px solid ${col}"
+          ${editAttrs(day,'shift',si)} ${past?'':'aria-haspopup="menu"'} title="${past?'历史排班只读':'设置时段、主播和投手'}">
+          <div class="t">${esc(s.time)||'未设置'}</div>
+          <div class="a" style="color:var(--ink-2)">${s.anchor?esc(s.anchor):'<span style="color:#F54A45">未排主播</span>'}</div>
+          <div class="o">投手：${esc(s.ops)||'—'}</div>
+        </div>`;
+      }).join('');
+      const legal=LEGAL.has(day.date)?'<span class="wd-legal">法定</span>':(HOLIDAY.has(day.date)?'<span class="wd-legal">假期</span>':'');
+      grid+=`<div class="week-day ${we?'we':''} ${past?'is-past':''} ${today?'is-today':''}" data-date="${iso(day)}" ${today?'aria-current="date"':''}>
+        <div class="wd-head ${today?'today':''}"><span class="n">${c.day}</span><span class="w">${wdNames[idx]}</span>${legal}${today?'<span class="today-tag">今天</span>':''}</div>
+        ${cards}
+        ${past?'<span class="readonly-tag">历史 · 只读</span>':`<button class="wd-add" data-add="shift" data-day="${c.day}">+ 班次</button>`}
+      </div>`;
+    });
+    html+=`<div class="week ${wk.some(cell=>cell.day&&iso(byDay[cell.day])===todayIso())?'has-today':''}">
+      <div class="week-title"><span>第 ${wi+1} 周</span><span>${month}月 ${range}</span></div>
+      <div class="week-grid">${grid}</div>
+    </div>`;
+  });
+  document.getElementById('mainArea').innerHTML=html;
+}
+
+/* ================= 渲染：侧栏统计 ================= */
+function countShifts(field){
+  const m=Object.create(null);
+  data.days.forEach(d=>d.shifts.forEach(s=>{
+    if(s[field]) m[s[field]]=(m[s[field]]||0)+1;
+  }));
+  // 补充候选池里为0的人
+  const pool=field==='anchor'?ANCHOR_POOL:OPS_POOL;
+  pool.forEach(p=>{if(!(p in m))m[p]=0;});
+  return Object.entries(m).sort((a,b)=>b[1]-a[1]);
+}
+function statRows(entries,field){
+  const max=Math.max(1,...entries.map(e=>e[1]));
+  const pool=field==='anchor'?ANCHOR_POOL:OPS_POOL;
+  return entries.map(([nm,ct])=>{
+    const c=colorOf(nm);
+    const hl=filterPerson===nm?'style="background:#f0ebfb"':'';
+    return `<div class="stat-row" data-filter="${esc(nm)}" ${hl}>
+      <span class="dot" style="background:${c}"></span>
+      <span class="nm">${esc(nm)}</span>
+      <span class="bar"><i style="width:${ct/max*100}%;background:${c}"></i></span>
+      <span class="ct">${ct}</span>
+      ${manageOpen[field]&&pool.includes(nm)?`<button class="person-remove" data-remove-person="${field}" data-name="${esc(nm)}" type="button" aria-label="删除${field==='anchor'?'主播':'投手'} ${esc(nm)}" title="移出可选人员"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"></path></svg></button>`:''}
+      ${manageOpen[field]&&!pool.includes(nm)?'<span class="retired-tag" title="已移出可选名单，历史班次仍计入统计">历史</span>':''}
+    </div>`;
+  }).join('');
+}
+function renderSidebar(){
+  document.getElementById('anchorStats').innerHTML=statRows(countShifts('anchor'),'anchor');
+  document.getElementById('opsStats').innerHTML=statRows(countShifts('ops'),'ops');
+  document.querySelectorAll('[data-manage]').forEach(button=>{
+    const open=manageOpen[button.dataset.manage];
+    button.setAttribute('aria-expanded',String(open));
+  });
+  document.querySelectorAll('[data-add-person]').forEach(button=>{button.hidden=!manageOpen[button.dataset.addPerson];});
+  // 休息统计：解析 rest（年假单独标注）
+  const restM={}, annualM={};
+  data.days.forEach(d=>{
+    if(!d.rest)return;
+    const annual=/年假/.test(d.rest);
+    splitPeople(d.rest).forEach(p=>{
+      if(annual) annualM[p]=(annualM[p]||0)+1;
+      restM[p]=(restM[p]||0)+1;
+    });
+  });
+  const entries=Object.entries(restM).sort((a,b)=>b[1]-a[1]);
+  document.getElementById('restStats').innerHTML = entries.length? entries.map(([nm,ct])=>{
+    const ann=annualM[nm]||0;
+    return `<div class="stat-row" data-filter="${esc(nm)}">
+      <span class="dot" style="background:#FED4A4"></span>
+      <span class="nm">${esc(nm)}</span>
+      <span class="bar"><i style="width:${ct/8*100}%;background:#FFBA6B"></i></span>
+      <span class="ct">${ct}${ann?`<span style="color:#9a6700" title="含年假">·${ann}年假</span>`:''}</span>
+    </div>`;
+  }).join('') : '<div style="color:#b6bcc6;font-size:12.5px;padding:8px 4px">暂无休息记录</div>';
+}
+
+function renderAll(){
+  renderStats();renderSidebar();
+  if(view==='list')renderList();else renderWeek();
+  document.body.classList.toggle('filtering',!!filterPerson);
+  // 高亮标记
+  if(filterPerson){
+    document.querySelectorAll('.person-cell,.shift-card').forEach(el=>{
+      const txt=el.textContent;
+      if(txt.includes(filterPerson)) el.classList.add('hl');
+    });
+  }
+}
+
+/* ================= 月历班次二级菜单 ================= */
+const shiftMenu=document.getElementById('shiftMenu');
+const shiftSubmenu=document.getElementById('shiftSubmenu');
+let shiftMenuCtx=null,shiftMenuField=null;
+function calendarMenuTarget(){
+  if(!shiftMenuCtx||shiftMenuCtx.month!==currentMonth)return null;
+  const day=data.days.find(item=>dayNum(item)===shiftMenuCtx.day);
+  const shift=day?.shifts[shiftMenuCtx.si];
+  return shift?{day,shift}:null;
+}
+function updateShiftMenu(){
+  const target=calendarMenuTarget();if(!target)return;
+  document.getElementById('shiftMenuHeading').textContent=`${iso(target.day)} · 班次设置`;
+  shiftMenu.querySelectorAll('[data-shift-field]').forEach(button=>{
+    const field=button.dataset.shiftField;
+    button.querySelector('strong').textContent=target.shift[field]||'未设置';
+    button.setAttribute('aria-expanded',String(field===shiftMenuField));
+  });
+}
+function openShiftMenu(anchorEl,dayNumber,si){
+  const day=data.days.find(item=>dayNum(item)===dayNumber);
+  if(!day?.shifts[si]||!ensureEditableDay(day))return;
+  closePop();closeTime();closeShiftMenu();
+  shiftMenuCtx={day:dayNumber,si,month:currentMonth};
+  updateShiftMenu();shiftMenu.classList.add('show');
+  const rect=anchorEl.getBoundingClientRect();
+  const width=shiftMenu.getBoundingClientRect().width||230;
+  const height=shiftMenu.getBoundingClientRect().height||200;
+  shiftMenu.style.left=`${Math.max(12,Math.min(rect.left,window.innerWidth-width-12))}px`;
+  shiftMenu.style.top=`${Math.max(12,Math.min(rect.bottom+6,window.innerHeight-height-12))}px`;
+  shiftMenu.querySelector('[data-shift-field="time"]')?.focus({preventScroll:true});
+}
+function positionShiftSubmenu(){
+  const rect=shiftMenu.getBoundingClientRect();
+  shiftSubmenu.classList.toggle('to-left',rect.right+307>window.innerWidth-12);
+  const fieldButton=shiftMenu.querySelector(`[data-shift-field="${shiftMenuField}"]`);
+  const rowTop=fieldButton?.offsetTop||36;
+  const height=shiftSubmenu.getBoundingClientRect().height;
+  shiftSubmenu.style.top=`${Math.max(12-rect.top,Math.min(rowTop,window.innerHeight-rect.top-height-12))}px`;
+  if(window.innerWidth<=650&&shiftMenu.getBoundingClientRect().bottom>window.innerHeight-12){
+    shiftMenu.style.top='12px';
+  }
+}
+function renderShiftPeople(query=''){
+  const target=calendarMenuTarget();if(!target)return;
+  const pool=shiftMenuField==='anchor'?ANCHOR_POOL:OPS_POOL;
+  const names=pool.filter(name=>!query||name.includes(query));
+  if(query&&!pool.includes(query))names.push(query);
+  document.getElementById('shiftPersonOptions').innerHTML=names.length?names.map(name=>
+    `<button class="shift-option ${target.shift[shiftMenuField]===name?'selected':''}" data-person="${esc(name)}"><span class="sw" style="background:${colorOf(name)}"></span>${esc(name)}</button>`
+  ).join(''):'<p class="shift-submenu-empty">输入姓名后点击确定</p>';
+}
+function openShiftSubmenu(field,focus=false){
+  const target=calendarMenuTarget();if(!target||!ensureEditableDay(target.day))return;
+  if(!['time','anchor','ops'].includes(field))return;
+  if(shiftMenuField!==field){
+    shiftMenuField=field;updateShiftMenu();
+    if(field==='time'){
+      const [start='',end='']=(target.shift.time||'').split('-');
+      const timeValue=value=>/^\d{1,2}:\d{2}$/.test(value)?value.padStart(5,'0'):'';
+      shiftSubmenu.innerHTML=`<h3>设置时段</h3><label for="shiftStartTime">开始 / 结束时间</label>
+        <div class="shift-time-inputs"><input id="shiftStartTime" aria-label="开始时间" type="time" step="60" value="${esc(timeValue(start))}"><span>–</span><input id="shiftEndTime" aria-label="结束时间" type="time" step="60" value="${esc(timeValue(end))}"></div>
+        <label>常用时段</label><div class="shift-options">${TIME_TEMPLATES.map(time=>`<button class="shift-option ${target.shift.time===time?'selected':''}" data-calendar-time="${time}">${time}</button>`).join('')}</div>
+        <div class="shift-submenu-footer"><button data-submenu-close>返回</button><button class="save" data-submenu-save>保存时段</button></div>`;
+    }else{
+      const label=field==='anchor'?'主播':'投手';
+      shiftSubmenu.innerHTML=`<h3>设置${label}</h3><input id="shiftPersonSearch" aria-label="搜索或输入${label}姓名" placeholder="搜索或输入${label}姓名" maxlength="120">
+        <div class="shift-options" id="shiftPersonOptions"></div><div class="shift-submenu-footer"><button data-submenu-clear>清除</button><button data-submenu-close>返回</button><button class="save" data-submenu-save>确定</button></div>`;
+      renderShiftPeople();
+    }
+  }
+  shiftSubmenu.classList.add('show');positionShiftSubmenu();
+  if(focus)shiftSubmenu.querySelector('input,button')?.focus({preventScroll:true});
+}
+function closeShiftSubmenu(){
+  shiftMenuField=null;shiftSubmenu.classList.remove('show');updateShiftMenu();
+}
+function closeShiftMenu(){
+  shiftMenu.classList.remove('show');shiftSubmenu.classList.remove('show');
+  shiftMenuCtx=null;shiftMenuField=null;
+}
+function setCalendarShiftField(field,value){
+  const target=calendarMenuTarget();if(!target||!ensureEditableDay(target.day))return false;
+  if(field==='time'&&!shiftDates(target.day,{time:value})){
+    toast('请选择有效的开始和结束时间，两个时刻不能相同','err');return false;
+  }
+  if(field==='anchor'&&target.shift.id&&!value){toast('已有班次的主播不能清空，请改选主播','err');return false;}
+  if(!['time','anchor','ops'].includes(field))return false;
+  if(target.shift[field]!==value){snapshotUndo();target.shift[field]=value;afterChange();}
+  closeShiftSubmenu();updateShiftMenu();
+  shiftMenu.querySelector(`[data-shift-field="${field}"]`)?.focus({preventScroll:true});
+  return true;
+}
+shiftMenu.querySelectorAll('[data-shift-field]').forEach(button=>{
+  button.addEventListener('pointerenter',()=>openShiftSubmenu(button.dataset.shiftField));
+  button.addEventListener('click',()=>openShiftSubmenu(button.dataset.shiftField,true));
+  button.addEventListener('keydown',event=>{
+    if(event.key==='ArrowRight'){event.preventDefault();openShiftSubmenu(button.dataset.shiftField,true);}
+    if(event.key==='ArrowDown'||event.key==='ArrowUp'){
+      event.preventDefault();const buttons=[...shiftMenu.querySelectorAll('[data-shift-field]')];
+      buttons[(buttons.indexOf(button)+(event.key==='ArrowDown'?1:2))%3].focus();
+    }
+  });
+});
+shiftSubmenu.addEventListener('input',event=>{
+  if(event.target.id==='shiftPersonSearch')renderShiftPeople(event.target.value.trim());
+});
+shiftSubmenu.addEventListener('click',event=>{
+  const button=event.target.closest('button');if(!button)return;
+  if(button.hasAttribute('data-submenu-close')){closeShiftSubmenu();return;}
+  if(button.hasAttribute('data-calendar-time')){setCalendarShiftField('time',button.dataset.calendarTime);return;}
+  if(button.hasAttribute('data-person')){setCalendarShiftField(shiftMenuField,button.dataset.person);return;}
+  if(button.hasAttribute('data-submenu-clear')){setCalendarShiftField(shiftMenuField,'');return;}
+  if(button.hasAttribute('data-submenu-save')){
+    if(shiftMenuField==='time')setCalendarShiftField('time',`${document.getElementById('shiftStartTime').value}-${document.getElementById('shiftEndTime').value}`);
+    else{const name=document.getElementById('shiftPersonSearch').value.trim();if(name)setCalendarShiftField(shiftMenuField,name);else toast('请选择人员或输入姓名','warn');}
+  }
+});
+shiftSubmenu.addEventListener('keydown',event=>{
+  if(event.key==='ArrowLeft'&&!event.target.matches('input')){event.preventDefault();const field=shiftMenuField;closeShiftSubmenu();shiftMenu.querySelector(`[data-shift-field="${field}"]`)?.focus();}
+  if(event.key==='Enter'&&event.target.id==='shiftPersonSearch'){
+    event.preventDefault();const name=event.target.value.trim();if(name)setCalendarShiftField(shiftMenuField,name);
+  }
+});
+document.addEventListener('mousedown',event=>{
+  if(shiftMenuCtx&&!shiftMenu.contains(event.target)&&!event.target.closest('[data-edit="shift"],[data-add="shift"]'))closeShiftMenu();
+});
+window.addEventListener('resize',closeShiftMenu);
+window.addEventListener('scroll',event=>{if(event.target===document)closeShiftMenu();},true);
+
+/* ================= 人员选择弹层 ================= */
+const pop=document.getElementById('pop');
+function openPop(anchorEl,ctx){
+  if(ctx.mode!=='add-person'&&!ensureEditableDay(data.days.find(day=>dayNum(day)===ctx.day)))return;
+  popCtx=ctx;
+  pop.dataset.field=ctx.field;
+  const multi = ctx.field==='rest'||ctx.field==='shoot';
+  const adding=ctx.mode==='add-person';
+  const pool = adding?[]:ctx.field==='anchor'?ANCHOR_POOL : ctx.field==='ops'?OPS_POOL : allPeople();
+  document.getElementById('popHint').textContent = adding
+    ? `输入新${ctx.field==='anchor'?'主播':'投手'}姓名，按回车或点击增加`
+    :multi?"可多选，多人将自动用 “/” 连接；也可在输入框补充如【年假】":(ctx.field==='anchor'?"选择主播，也可输入新姓名":"选择投手，也可输入新姓名");
+  document.getElementById('popClear').hidden=adding;
+  document.getElementById('popOk').textContent=adding?'增加':'确定';
+  document.getElementById('popSearch').value="";
+  buildPopList(pool,"",multi,currentVal(ctx));
+  const r=anchorEl.getBoundingClientRect();
+  pop.classList.add('show');
+  let left=r.left, top=r.bottom+6;
+  if(left+248>window.innerWidth-12) left=window.innerWidth-260;
+  if(top+300>window.innerHeight) top=r.top-302;
+  pop.style.left=Math.max(12,left)+'px'; pop.style.top=Math.max(12,top)+'px';
+  setTimeout(()=>document.getElementById('popSearch').focus(),10);
+}
+function currentVal(ctx){
+  if(ctx.mode==='add-person')return '';
+  const day=data.days.find(d=>dayNum(d)===ctx.day);
+  if(ctx.field==='rest'||ctx.field==='shoot') return day[ctx.field];
+  return day.shifts[ctx.shift][ctx.field];
+}
+function buildPopList(pool,q,multi,cur){
+  q=q.trim();
+  let opts=pool.filter(p=>!q||p.includes(q));
+  let html=opts.map(p=>{
+    const c=colorOf(p);
+    const sel = multi? splitPeople(cur).includes(p) : cur===p;
+    return `<div class="pop-opt ${sel?'sel':''}" data-name="${esc(p)}">
+      <span class="sw" style="background:${c};color:${textOn(c)}">${initial(p)}</span>${esc(p)}
+      <span class="ck"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+    </div>`;
+  }).join('');
+  // 自定义输入值（回车）
+  if(q&&!pool.includes(q)) html=`<div class="pop-opt" data-name="${esc(q)}" data-custom="1">
+    <span class="sw" style="background:#eee;color#666">+</span>使用“${esc(q)}”</div>`+html;
+  if(!html) html='<div style="padding:14px;color:#b6bcc6;font-size:12.5px;text-align:center">无匹配，回车使用输入内容</div>';
+  document.getElementById('popList').innerHTML=html;
+}
+document.getElementById('popList').addEventListener('click',e=>{
+  const opt=e.target.closest('.pop-opt'); if(!opt)return;
+  const name=opt.dataset.name;
+  if(popCtx.mode==='add-person'){setPopValue(name);closePop();return;}
+  const multi=popCtx.field==='rest'||popCtx.field==='shoot';
+  let cur=currentVal(popCtx);
+  if(multi){
+    let arr=splitPeople(cur);
+    if(arr.includes(name)) arr=arr.filter(x=>x!==name); else arr.push(name);
+    setPopValue(arr.join('/'));
+    buildPopList(allPeople(),document.getElementById('popSearch').value,true,arr.join('/'));
+  }else{
+    setPopValue(name); closePop();
+  }
+});
+document.getElementById('popSearch').addEventListener('input',e=>{
+  const multi=popCtx.field==='rest'||popCtx.field==='shoot';
+  const pool=popCtx.mode==='add-person'?[]:popCtx.field==='anchor'?ANCHOR_POOL:popCtx.field==='ops'?OPS_POOL:allPeople();
+  buildPopList(pool,e.target.value,multi,currentVal(popCtx));
+});
+document.getElementById('popSearch').addEventListener('keydown',e=>{
+  if(e.key==='Enter'){
+    const v=e.target.value.trim(); if(!v)return;
+    const multi=popCtx.field==='rest'||popCtx.field==='shoot';
+    let cur=currentVal(popCtx);
+    if(multi){const arr=splitPeople(cur);if(!arr.includes(v))arr.push(v);setPopValue(arr.join('/'));}
+    else setPopValue(v);
+    closePop();
+  }else if(e.key==='Escape')closePop();
+});
+document.getElementById('popClear').addEventListener('click',()=>{setPopValue("");closePop();});
+document.getElementById('popOk').addEventListener('click',()=>{
+  const v=document.getElementById('popSearch').value.trim();
+  if(popCtx.mode==='add-person'&&!v){toast('请输入姓名','err');return;}
+  if(v){const multi=popCtx.field==='rest'||popCtx.field==='shoot';
+    if(multi){const arr=splitPeople(currentVal(popCtx));if(!arr.includes(v))arr.push(v);setPopValue(arr.join('/'));}
+    else setPopValue(v);}
+  closePop();
+});
+function setPopValue(v){
+  if(popCtx.mode==='add-person'){
+    const field=popCtx.field;
+    const name=v.trim();
+    const pool=field==='anchor'?ANCHOR_POOL:OPS_POOL;
+    if(!name||name.length>120||/[\x00-\x1f]/.test(name)){toast('姓名不能为空或超过 120 字','err');return;}
+    if(pool.includes(name)){toast('该人员已在名单中','warn');return;}
+    savePeople(field,[...pool,name]).then(()=>toast(`已增加${field==='anchor'?'主播':'投手'} ${name}`)).catch(error=>toast(error.message||String(error),'err'));
+    return;
+  }
+  const day=data.days.find(d=>dayNum(d)===popCtx.day);
+  if(!ensureEditableDay(day))return;
+  if(popCtx.field==='rest'||popCtx.field==='shoot'){
+    if(day[popCtx.field]!==v){snapshotUndo();day[popCtx.field]=v;afterChange();}
+  }else{
+    if(popCtx.field==='anchor'&&day.shifts[popCtx.shift].id&&!v){toast('已有班次的主播不能清空，请改选主播或删除班次','err');return;}
+    if(day.shifts[popCtx.shift][popCtx.field]!==v){snapshotUndo();day.shifts[popCtx.shift][popCtx.field]=v;afterChange();}
+  }
+}
+function closePop(){pop.classList.remove('show');popCtx=null;}
+document.addEventListener('mousedown',e=>{
+  if(pop.classList.contains('show')&&!pop.contains(e.target)&&
+    !(e.target.closest('[data-edit]'))) closePop();
+});
+
+/* ================= 时段编辑 ================= */
+let timeCtx=null;
+function openTime(day,si,anchorEl){
+  if(!ensureEditableDay(data.days.find(item=>dayNum(item)===day)))return;
+  timeCtx={day,si};
+  const val=data.days.find(d=>dayNum(d)===day).shifts[si].time;
+  document.getElementById('timeInput').value=val||"";
+  document.getElementById('tplGrid').innerHTML=TIME_TEMPLATES.map(t=>
+    `<div class="tpl ${t===val?'sel':''}" data-tpl="${t}">${t}</div>`).join('');
+  document.getElementById('timeMask').classList.add('show');
+  setTimeout(()=>document.getElementById('timeInput').focus(),10);
+}
+document.getElementById('tplGrid').addEventListener('click',e=>{
+  const t=e.target.closest('.tpl');if(!t)return;
+  document.getElementById('timeInput').value=t.dataset.tpl;
+  document.querySelectorAll('.tpl').forEach(x=>x.classList.remove('sel'));
+  t.classList.add('sel');
+});
+document.getElementById('timeSave').addEventListener('click',()=>{
+  let v=document.getElementById('timeInput').value.trim();
+  if(!/^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/.test(v)){toast("时段格式不正确，示例：7:00-11:30","err");return;}
+  const d=data.days.find(x=>dayNum(x)===timeCtx.day);
+  if(!ensureEditableDay(d))return;
+  snapshotUndo(); d.shifts[timeCtx.si].time=v; afterChange();
+  closeTime();
+});
+function closeTime(){document.getElementById('timeMask').classList.remove('show');timeCtx=null;}
+document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>
+  document.getElementById(b.dataset.close).classList.remove('show')));
+document.getElementById('timeMask').addEventListener('click',e=>{if(e.target.id==='timeMask')closeTime();});
+
+/* ================= 增删班次 ================= */
+function addShift(dayNum_){
+  const d=data.days.find(x=>dayNum(x)===dayNum_);
+  if(!ensureEditableDay(d))return;
+  snapshotUndo();
+  d.shifts.push({time:"",anchor:"",ops:""});
+  afterChange();
+  if(view==='week')requestAnimationFrame(()=>{
+    const card=document.querySelector(`[data-edit="shift"][data-day="${dayNum_}"][data-shift="${d.shifts.length-1}"]`);
+    if(card)openShiftMenu(card,dayNum_,d.shifts.length-1);
+  });
+  toast(`已为 ${currentMonth.slice(5)}/${dayNum_} 添加空班次，请设置时段、主播和投手`,null,true);
+}
+function delShift(dayNum_,si){
+  const d=data.days.find(x=>dayNum(x)===dayNum_);
+  if(!ensureEditableDay(d))return;
+  const s=d.shifts[si];
+  snapshotUndo();
+  d.shifts.splice(si,1);
+  afterChange();
+  toast(`已删除班次 ${s.time||''} ${s.anchor||''}`,null,true);
+}
+
+/* ================= 事件委托 ================= */
+document.getElementById('mainArea').addEventListener('click',e=>{
+  if(e.target.closest('.is-past')||e.target.closest('[disabled],[aria-disabled="true"]'))return;
+  const calendarShift=e.target.closest('[data-edit="shift"]');
+  if(calendarShift){openShiftMenu(calendarShift,+calendarShift.dataset.day,+calendarShift.dataset.shift);return;}
+  // 编辑人员
+  const pe=e.target.closest('[data-edit="person"]');
+  if(pe){openPop(pe,{day:+pe.dataset.day,shift:+pe.dataset.shift,field:pe.dataset.field});return;}
+  // 编辑休息/拍摄
+  const df=e.target.closest('[data-edit="dayfield"]');
+  if(df){
+    const fake={getBoundingClientRect:()=>df.getBoundingClientRect()};
+    openPop(df,{day:+df.dataset.day,shift:null,field:df.dataset.field});return;
+  }
+  // 编辑时段
+  const tm=e.target.closest('[data-edit="time"]');
+  if(tm){openTime(+tm.dataset.day,+tm.dataset.shift,tm);return;}
+  // 添加
+  const ad=e.target.closest('[data-add="shift"]');
+  if(ad){addShift(+ad.dataset.day);return;}
+  // 删除
+  const dl=e.target.closest('[data-del="shift"]');
+  if(dl){delShift(+dl.dataset.day,+dl.dataset.shift);return;}
+  const action=e.target.closest('[data-action]');
+  if(action){handleRowAction(action).catch(error=>toast(error.message||String(error),'err'));return;}
+});
+document.getElementById('mainArea').addEventListener('keydown',e=>{
+  if((e.key==='Enter'||e.key===' ')&&e.target.matches('[data-edit]')){e.preventDefault();e.target.click();}
+});
+async function handleRowAction(button){
+  if(button.disabled)return;
+  const day=data.days.find(item=>dayNum(item)===Number(button.dataset.day));
+  if(!ensureEditableDay(day))return;
+  const shift=day?.shifts[Number(button.dataset.shift)];if(!shift)return;
+  if(button.dataset.action==='delete'){
+    if(shift.report_id){toast('已有采集报告的班次请停用保留','err');return;}
+    delShift(Number(button.dataset.day),Number(button.dataset.shift));return;
+  }
+  if(!shift.id)return;
+  if(button.dataset.action==='interrupt'){openInterruption(day,shift);return;}
+  await syncPromise;
+  button.disabled=true;
+  try{
+    const action=button.dataset.action;
+    await request(`/api/schedules/${shift.id}/${action==='run'?'run':'toggle'}`,{method:'POST'});
+    toast(action==='run'?'已加入人工采集队列':'排班状态已更新');
+    await loadRemote();
+  }finally{button.disabled=false;}
+}
+
+let interruptTarget=null;
+function shiftDates(day,shift){
+  // Empty or partial drafts must not break rendering of the whole roster.
+  const parts=typeof shift.time==='string'?shift.time.split('-'):[];
+  if(parts.length!==2)return null;
+  const normalize=value=>{
+    const match=value.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if(!match||Number(match[1])>23||Number(match[2])>59||Number(match[3]||0)>59)return null;
+    return `${match[1].padStart(2,'0')}:${match[2]}:${match[3]||'00'}`;
+  };
+  const left=normalize(parts[0]),right=normalize(parts[1]);
+  if(!left||!right||left===right)return null;
+  const start=new Date(`${iso(day)}T${left}+08:00`);
+  const end=new Date(`${iso(day)}T${right}+08:00`);
+  if(end<=start)end.setTime(end.getTime()+86400000);
+  return {start,end};
+}
+function interruptButtonHTML(day,shift,n,si){
+  const dates=shiftDates(day,shift);
+  const enabled=shift.id&&shift.enabled!==false&&iso(day)===todayIso()&&dates&&dates.start<=new Date();
+  const events=shift.interruptions||[];
+  const badge=events.length?`<span class="row-status">中断 ${events.length} 次${events.some(e=>e.status==='partial')?' · 待重试':''}</span>`:'';
+  return `${badge}<button class="row-action" data-action="interrupt" data-day="${n}" data-shift="${si}" ${enabled?'':'disabled title="当天班次开始后可标记中断"'}>标记中断</button>`;
+}
+function localInputTime(date){return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}T${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}:${String(date.getSeconds()).padStart(2,'0')}`;}
+function openInterruption(day,shift){
+  const dates=shiftDates(day,shift);
+  if(!dates||!ensureEditableDay(day))return;
+  interruptTarget=shift;
+  const {start,end}=dates,now=new Date(),maximum=new Date(Math.min(now.getTime(),end.getTime()-1000));
+  document.getElementById('interruptShift').textContent=`${shift.anchor} · ${iso(day)} ${shift.time}`;
+  const input=document.getElementById('interruptTime');
+  input.min=localInputTime(start);input.max=localInputTime(maximum);input.value=input.max;
+  const history=document.getElementById('interruptHistory');history.replaceChildren();
+  for(const event of shift.interruptions||[]){
+    const button=document.createElement('button');button.className='row-action';button.textContent=`${event.interrupted_at.replace('T',' ').slice(0,19)} · ${event.status==='partial'?'数据不完整，重试':'已保存，重采此场'}`;
+    button.onclick=()=>{input.value=event.interrupted_at.slice(0,19);};history.append(button);
+  }
+  document.getElementById('interruptMask').classList.add('show');input.focus();
+}
+document.getElementById('interruptSave').addEventListener('click',async event=>{
+  const input=document.getElementById('interruptTime');
+  if(!interruptTarget||!input.value||!input.reportValidity())return;
+  const button=event.currentTarget;button.disabled=true;
+  try{
+    await syncPromise;
+    const result=await request(`/api/schedules/${interruptTarget.id}/interrupt`,{method:'POST',body:JSON.stringify({interrupted_at:input.value})});
+    document.getElementById('interruptMask').classList.remove('show');toast('已加入中断采集队列，完成后保存旧场片段');await loadRemote();
+    pollInterruption(result.run.id);
+  }catch(error){toast(error.message||String(error),'err');}finally{button.disabled=false;}
+});
+async function pollInterruption(runId){
+  try{
+    const result=await request(`/api/runs/${runId}`),run=result.item;
+    if(['queued','running'].includes(run.status)){setTimeout(()=>pollInterruption(runId),3000);return;}
+    toast(run.message,run.status==='succeeded'?'ok':'err');await loadRemote();
+  }catch(error){toast(error.message||String(error),'err');}
+}
+
+/* 侧栏人员管理与筛选 */
+document.querySelector('.sidebar').addEventListener('click',e=>{
+  const manage=e.target.closest('[data-manage]');
+  if(manage){manageOpen[manage.dataset.manage]=!manageOpen[manage.dataset.manage];renderSidebar();return;}
+  const add=e.target.closest('[data-add-person]');
+  if(add){openPop(add,{mode:'add-person',field:add.dataset.addPerson});return;}
+  const remove=e.target.closest('[data-remove-person]');
+  if(remove){
+    const field=remove.dataset.removePerson,name=remove.dataset.name;
+    const label=field==='anchor'?'主播':'投手';
+    if(!confirm(`将${label}“${name}”移出可选名单？已有排班会保留。`))return;
+    const pool=field==='anchor'?ANCHOR_POOL:OPS_POOL;
+    savePeople(field,pool.filter(person=>person!==name)).then(()=>toast(`已移出${label} ${name}`)).catch(error=>toast(error.message||String(error),'err'));
+    return;
+  }
+  const r=e.target.closest('[data-filter]');if(!r)return;
+  const nm=r.dataset.filter;
+  filterPerson = filterPerson===nm?null:nm;
+  searchQ="";document.getElementById('searchInput').value="";
+  renderAll();
+  if(filterPerson) toast(`已高亮「${filterPerson}」的全部排班，再次点击该人员取消`);
+});
+
+/* 视图切换 */
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active'); view=t.dataset.view;
+  renderAll();
+  openCurrentRoster().catch(error=>toast(error.message||String(error),'err'));
+}));
+document.getElementById('prevMonth').addEventListener('click',()=>setMonth(-1).catch(error=>toast(error.message||String(error),'err')));
+document.getElementById('nextMonth').addEventListener('click',()=>setMonth(1).catch(error=>toast(error.message||String(error),'err')));
+document.getElementById('thisMonth').addEventListener('click',()=>setMonth(0).catch(error=>toast(error.message||String(error),'err')));
+document.getElementById('autoBtn').addEventListener('click',async()=>{
+  if(currentMonth<todayIso().slice(0,7)){toast('历史月份不能自动排班','warn');return;}
+  if(data.days.some(day=>day.shifts.length||day.rest||day.shoot)){toast('该月已有排班或备注，请选择空月份自动排班','err');return;}
+  const [year,month]=currentMonth.split('-').map(Number);
+  if(!confirm(`按 2026 年 10 月班表生成 ${year} 年 ${month} 月排班？`))return;
+  const button=document.getElementById('autoBtn');button.disabled=true;
+  try{const result=await request('/api/schedules/auto-fill',{method:'POST',body:JSON.stringify({year,month})});await loadRemote();toast(`已自动生成 ${result.count} 个班次`);}
+  catch(error){toast(error.message||String(error),'err');}finally{button.disabled=false;}
+});
+
+/* 搜索 */
+document.getElementById('searchInput').addEventListener('input',e=>{
+  searchQ=e.target.value.trim(); filterPerson=null;
+  document.body.classList.remove('filtering');
+  if(view==='list')renderList();
+});
+
+/* 重置 */
+document.getElementById('resetBtn').addEventListener('click',async()=>{
+  if(currentMonth<todayIso().slice(0,7)){toast('历史月份不能恢复排班','warn');return;}
+  const [year,month]=currentMonth.split('-').map(Number);
+  if(!confirm(`恢复 ${year} 年 ${month} 月今天及未来日期的模板排班？未产生报告的班次及备注将被替换，历史日期保留。`))return;
+  const button=document.getElementById('resetBtn');button.disabled=true;
+  try{await syncPromise;const result=await request('/api/schedules/auto-fill',{method:'POST',body:JSON.stringify({year,month,replace:true})});
+    const historyDrafts=data.days.filter(isPastDay).map(day=>({date:day.date,shifts:day.shifts.filter(shift=>!shift.id)}));
+    localStorage.setItem(STORE_KEY(),JSON.stringify(historyDrafts));await loadRemote();toast(`已恢复模板排班，共 ${result.count} 个班次`);}
+  catch(error){toast(error.message||String(error),'err');}finally{button.disabled=false;}
+});
+
+/* 导出 CSV（还原7列结构） */
+document.getElementById('exportBtn').addEventListener('click',()=>{
+  const head=["星期","日期","时段","主播","投手","休息","日常拍摄"];
+  const lines=[head.join(',')];
+  data.days.forEach(d=>{
+    d.shifts.forEach((s,i)=>{
+      const a=i===0?[d.weekday,d.date]:["",""];
+      const f=i===0?[d.rest,d.shoot]:["",""];
+      const row=[...a,s.time,s.anchor,s.ops,...f].map(x=>`"${(x||"").replace(/"/g,'""')}"`);
+      lines.push(row.join(','));
+    });
+  });
+  const blob=new Blob(["\uFEFF"+lines.join('\n')],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download=`${currentMonth}直播间排班.csv`; a.click();URL.revokeObjectURL(a.href);
+  toast("已导出 CSV 文件");
+});
+
+/* ================= Toast ================= */
+function toast(msg,type,canUndo){
+  const wrap=document.getElementById('toastWrap');
+  const el=document.createElement('div');
+  el.className='toast '+(type||'');
+  el.innerHTML=`<span>${esc(msg)}</span>${canUndo?'<button id="undoBtn">撤销</button>':''}`;
+  wrap.appendChild(el);
+  if(canUndo){
+    el.querySelector('#undoBtn').addEventListener('click',()=>{
+      if(undoSnap){data=undoSnap;undoSnap=null;save();renderAll();syncData();toast("已撤销");}
+    });
+  }
+  setTimeout(()=>{el.style.transition='opacity .3s';el.style.opacity='0';setTimeout(()=>el.remove(),300);},3600);
+}
+
+function afterChange(){save();renderAll();checkGlobalConflicts();syncData();}
+function checkGlobalConflicts(){
+  let n=0;
+  data.days.forEach(d=>{n+=dayConflicts(d).filter(x=>!x.warn).length;});
+  return n;
+}
+
+/* 键盘 */
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){
+    closePop();closeTime();
+    if(shiftMenuCtx){
+      const card=document.querySelector(`[data-edit="shift"][data-day="${shiftMenuCtx.day}"][data-shift="${shiftMenuCtx.si}"]`);
+      closeShiftMenu();card?.focus({preventScroll:true});
+    }
+  }
+});
+
+/* 初始化 */
+const rosterTopbar=document.querySelector('.topbar');
+const rosterTabs=document.querySelector('.tabs');
+const updateStickyOffsets=()=>{
+  document.documentElement.style.setProperty('--roster-topbar-height',`${rosterTopbar.getBoundingClientRect().height}px`);
+  document.documentElement.style.setProperty('--roster-tabs-height',`${rosterTabs.getBoundingClientRect().height}px`);
+};
+new ResizeObserver(updateStickyOffsets).observe(rosterTopbar);
+new ResizeObserver(updateStickyOffsets).observe(rosterTabs);
+updateStickyOffsets();
+document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.view===view));
+renderAll();
+const initialConflicts=checkGlobalConflicts();
+if(initialConflicts>0) setTimeout(()=>toast(`检测到 ${initialConflicts} 处排班冲突，已用红色标出，请核对`,"warn"),500);
+loadRemote({focus:true}).catch(error=>toast(error.message||String(error),'err'));
+loadPeople().catch(error=>toast(error.message||String(error),'err'));
+window.addEventListener('message',event=>{
+  if(event.origin===location.origin&&event.source===window.parent&&event.data?.type==='liveops:roster-open'){
+    openCurrentRoster().catch(error=>toast(error.message||String(error),'err'));return;
+  }
+  if(event.origin!==location.origin||event.data?.type!=='liveops:roster-refresh')return;
+  syncPromise.then(()=>loadRemote()).catch(error=>toast(error.message||String(error),'err'));
+});
+</script>
+</body>
+</html>

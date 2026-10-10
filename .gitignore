@@ -1,0 +1,42 @@
+# Python environments, caches, and build output
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+
+# Local configuration, credentials, databases, and browser state
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.sqlite*
+*.db
+storage_state*.json
+playwright/.auth/
+var/
+liveops/data/schedule_template_2026-10.json
+
+# Runtime output and package caches
+logs/
+artifacts/
+playwright-report/
+*.log
+*.tmp
+*.bak
+node_modules/
+.npm-cache/
+
+# Operating system files
+.DS_Store
+Thumbs.db
