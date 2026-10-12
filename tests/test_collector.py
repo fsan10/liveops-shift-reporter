@@ -211,8 +211,8 @@ async def test_qianchuan_keeps_its_existing_full_page_viewport(monkeypatch, tmp_
     assert page.viewport == {"width": 615, "height": 418}
 
 
-@pytest.mark.parametrize("qian_fails", [False, True])
-async def test_report_tabs_stay_open_and_are_reused_even_after_page_failure(monkeypatch, qian_fails):
+@pytest.mark.parametrize("failure_mode", ["never", "always", "reused_once"])
+async def test_report_tabs_stay_open_and_are_reused_even_after_page_failure(monkeypatch, failure_mode):
     class Page(NavigationPage):
         def __init__(self):
             super().__init__("about:blank")
@@ -258,8 +258,12 @@ async def test_report_tabs_stay_open_and_are_reused_even_after_page_failure(monk
     async def section(*_args):
         return Section()
 
-    async def qian(*_args, **_kwargs):
-        if qian_fails:
+    qian_calls = []
+
+    async def qian(*args, **kwargs):
+        qian_calls.append((args[0], kwargs["reused"]))
+        if failure_mode == "always" or (failure_mode == "reused_once"
+                                        and kwargs["reused"] and len(qian_calls) == 2):
             raise RuntimeError("card not ready")
 
     monkeypatch.setattr(ResponseCollector, "wait_for_data", ready)
@@ -269,12 +273,15 @@ async def test_report_tabs_stay_open_and_are_reused_even_after_page_failure(monk
     monkeypatch.setattr(collector_module, "_prepare_qianchuan", qian)
     context = Context()
     context.pages = []
-    for _ in range(2):
+    for attempt in range(3):
         _, _, errors = await collector_module._capture_report_pages(context, room_id="123", aavid="456",
             modules=[], run_id="test", work_date=collector_module.date(2026, 10, 9), schedule_id=1, screenshots=False)
-        assert bool(errors) == qian_fails
-        assert len(context.pages) == 4
+        assert bool(errors) == (failure_mode == "always")
+        extra = attempt if failure_mode == "always" else int(failure_mode == "reused_once" and attempt > 0)
+        assert len(context.pages) == 4 + extra
         assert all(not page.listeners and page.closes == 0 for page in context.pages)
     detail = next(page for page in context.pages if "/shop/live-detail" in page.url)
-    assert detail.reloads == 1
+    assert detail.reloads == 2
     assert all(page.reloads == 0 for page in context.pages if page is not detail)
+    if failure_mode == "reused_once":
+        assert qian_calls[-1] == (context.pages[-1], True)

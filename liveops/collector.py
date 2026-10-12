@@ -456,6 +456,68 @@ async def discover_room_sessions(context: BrowserContext, start: datetime, end: 
             "active_room_id": next(iter(active_ids), ""), "rooms": rooms}
 
 
+async def _report_room(
+    context: BrowserContext, *, settings: dict[str, str], schedule: Any,
+    baseline: dict[str, Any] | None, saved: list[dict[str, Any]],
+    start: datetime, end: datetime, interrupted_at: datetime | None,
+) -> dict[str, Any]:
+    """Keep a confirmed room across handoffs; only a manual mark unlocks discovery."""
+    baseline = baseline or {}
+    author = settings.get("live_author_id", "") or str(baseline.get("author_id") or "")
+    pinned = str(schedule.live_room_id or baseline.get("live_room_id")
+                 or settings.get("live_room_id", "")).strip()
+    marked = {s["room"]["live_room_id"] for s in saved}
+    cutoff = interrupted_at or min(end, datetime.now(APP_TIMEZONE))
+    prior = [s for s in saved if local_datetime(s["source"]["segment_end"]) < cutoff]
+    left = max((local_datetime(s["source"]["segment_end"]) for s in prior), default=start)
+
+    # Retrying the same mark must recapture the old room, even if a new one is live.
+    retry = next((s for s in saved if interrupted_at is not None
+                  and local_datetime(s["source"]["segment_end"]) == interrupted_at), None)
+    if retry:
+        target = {**retry["room"], "author_id": author or retry["room"].get("author_id", "")}
+        return {"rooms": [target], "author_id": target["author_id"], "source": "interruption_retry"}
+    if pinned and pinned not in marked:
+        source = "schedule_room" if schedule.live_room_id else "handoff_room"
+        if not schedule.live_room_id and pinned != str(baseline.get("live_room_id") or ""):
+            source = "configured_room"
+        return {"rooms": [{"live_room_id": pinned, "author_id": author}],
+                "author_id": author, "source": source}
+    if not _automatic_room_for(schedule):
+        raise RuntimeError("非当天排班无法自动发现直播间 ID，请在排班中填写直播间 ID。")
+
+    # Use the business interval, including both dates of a midnight handoff.
+    active, history = await _overview_data(context, start, cutoff)
+    author = select_author(active, history, author)
+    by_id = {r["live_room_id"]: r for r in history}
+    for r in active:
+        by_id[r["live_room_id"]] = {**by_id.get(r["live_room_id"], {}),
+                                     **{k: v for k, v in r.items() if v is not None}}
+    candidates = [r for r in overlapping_rooms(list(by_id.values()), left, cutoff, author)
+                  if r["live_room_id"] not in marked]
+    audit = {"author_id": author, "query_start": start.isoformat(),
+             "query_end": cutoff.isoformat(),
+             "active_room_ids": [r["live_room_id"] for r in active if r["author_id"] == author],
+             "candidate_room_ids": [r["live_room_id"] for r in candidates]}
+    if interrupted_at is not None and candidates:
+        # An explicit mark can locate the latest old room before its marked time.
+        candidates = candidates[-1:]
+    if len(candidates) == 1:
+        return {**audit, "rooms": candidates,
+                "source": "manual_restart" if saved else "initial_discovery"}
+    if not candidates and saved and interrupted_at is None:
+        last = max(saved, key=lambda s: local_datetime(s["source"]["segment_end"]))
+        old = by_id.get(last["room"]["live_room_id"])
+        if old and old["author_id"] == author and old.get("is_living") is False:
+            return {**audit, "rooms": [old], "source": "interruption_without_restart"}
+    raise RuntimeError(
+        f"班次日期范围 {start.date()} 至 {cutoff.date()} 内，账号 {author} "
+        f"匹配 {len(candidates)} 个未保存的场次；"
+        + ("存在多场直播，请逐场标记中断，不能自动选最新场。" if candidates
+           else "未找到可归属场次，请核对已保存场次和中断记录。")
+    )
+
+
 async def ensure_shop_login(context: BrowserContext, settings: dict[str, str]) -> None:
     """Reuse an FXG tab and the existing merchant login recovery state machine."""
     page = next(
@@ -638,7 +700,9 @@ async def _capture_report_pages(
         page = next(
             (
                 candidate
-                for candidate in context.pages
+                # A successful recovery tab should be reused before an older,
+                # retained tab whose stopped-room initialization has stalled.
+                for candidate in (reversed(context.pages) if kind == "qianchuan" else context.pages)
                 if not candidate.is_closed()
                 and urlparse(candidate.url).path == path
                 and _room_id(candidate.url) == room_id
@@ -771,7 +835,23 @@ async def _capture_report_pages(
             note("qianchuan", "进入千川页面，选择全域支付数据并等待指标和卡片加载完成。")
             since = len(collector.responses)
             page = await load("qianchuan", "/board-next")
-            await _prepare_qianchuan(page, collector, since=since, reused=reused_pages["qianchuan"])
+            try:
+                await _prepare_qianchuan(page, collector, since=since, reused=reused_pages["qianchuan"])
+            except (RuntimeError, PlaywrightTimeoutError):
+                if not reused_pages["qianchuan"]:
+                    raise
+                # Some retained ended-room boards keep cards but lose their
+                # initialization context: mode changes/refresh produce no XHR.
+                # Preserve that tab and initialize this same room once in a new
+                # tab, then verify fresh payment responses against its cards.
+                note("qianchuan", "原千川标签未取得有效新数据，保留原页并重新初始化同场页面。", "info")
+                since = len(collector.responses)
+                page = await context.new_page()
+                collector.bind(page)
+                bound_pages.add(page)
+                await page.bring_to_front()
+                await _goto(page, urls["qianchuan"])
+                await _prepare_qianchuan(page, collector, since=since, reused=False)
             note(
                 "qianchuan",
                 "全域支付数据已就绪，消耗、千川券、补贴、曝光和 GPM 接口均完整。",
@@ -813,6 +893,7 @@ async def collect_report(
     on_captured: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
     interruption_segments: list[dict[str, Any]] | None = None,
     interrupted_at: datetime | None = None,
+    on_room_confirmed: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     shop = settings.get("shop_name", "")
     room_id = str(schedule.live_room_id or settings.get("live_room_id", "")).strip()
@@ -833,32 +914,18 @@ async def collect_report(
         await ensure_shop_login(context, settings)
         if progress:
             progress("browser", "店铺登录状态正常。", "succeeded")
-        if _automatic_room_for(schedule):
-            author_id = settings.get("live_author_id", "") or str((baseline or {}).get("author_id") or "")
-            if interrupted_at is not None:
-                discovery = await discover_room_sessions(context, start_at, interrupted_at, author_id)
-                target = discovery["rooms"][-1]
-                room_discovery = {**discovery, "rooms": [target], "source": "manual_interruption"}
-            else:
-                active, history = await _overview_data(context)
-                target_author = select_author(active, history, author_id)
-                candidates = [r for r in active if r["author_id"] == target_author]
-                if not candidates:
-                    candidates = [r for r in history if r["author_id"] == target_author and r.get("live_start")]
-                    candidates.sort(key=lambda r: r["live_start"], reverse=True)
-                    candidates = candidates[:1]
-                if len(candidates) != 1:
-                    raise RuntimeError("无法确认当前直播场次，请检查直播账号。")
-                room_discovery = {"rooms": candidates, "author_id": target_author, "source": "current_snapshot"}
-            if progress:
-                progress("room", "已发现当前场次；仅合并本班次手动保存的中断片段。", "succeeded")
-        elif not room_id:
-            raise RuntimeError("非当天排班无法自动发现直播间 ID，请在排班中填写直播间 ID。")
-        rooms = room_discovery.get("rooms") or [{"live_room_id": room_id, "author_id": settings.get("live_author_id", "")}]
+        room_discovery = await _report_room(
+            context, settings=settings, schedule=schedule, baseline=baseline,
+            saved=list(interruption_segments or []), start=start_at, end=end_at,
+            interrupted_at=interrupted_at,
+        )
+        rooms = room_discovery["rooms"]
+        if progress:
+            progress("room", f"采集目标：{rooms[0]['live_room_id']}；来源：{room_discovery['source']}。", "succeeded")
         for room in rooms:
             room_id = room["live_room_id"]
             if interrupted_at is None and any(s["room"]["live_room_id"] == room_id for s in segments):
-                if room.get("is_living") is False:
+                if room_discovery["source"] == "interruption_without_restart":
                     # No restart: finalize the already captured fragments once.
                     room_id = segments[-1]["room"]["live_room_id"]
                     break
@@ -872,12 +939,20 @@ async def collect_report(
             )
             captured_at = datetime.now(APP_TIMEZONE)
             room = confirmed_room(room_responses, room)
+            if local_datetime(room["live_start"]) >= (interrupted_at or min(end_at, captured_at)):
+                raise RuntimeError("已绑定场次在本次采集区间之后开播，拒绝归入该班次。")
+            if room.get("live_end") and local_datetime(room["live_end"]) <= start_at:
+                raise RuntimeError("已绑定场次在本班次开始前结束，请核对场次 ID。")
+            room_discovery["rooms"] = [room]
+            room_discovery["author_id"] = room["author_id"]
             for row in room_responses:
                 if row.get("live_room_id") and row["live_room_id"] != room_id:
                     raise RuntimeError("采集响应场次不匹配，拒绝混入其他直播间。")
                 if row.get("qianchuan_account_id") and row["qianchuan_account_id"] != aavid:
                     raise RuntimeError("千川响应广告账户不匹配，拒绝混用消耗数据。")
                 row["live_room_id"] = room_id
+            if on_room_confirmed:
+                on_room_confirmed({**room_discovery, "live_room_id": room_id})
             snapshot = capture_snapshot(room_responses, room_id, aavid, captured_at.isoformat())
             interval_end = interrupted_at or min(end_at, captured_at)
             earlier = [s for s in (interruption_segments or [])

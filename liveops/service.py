@@ -639,6 +639,20 @@ class RunDispatcher:
                         name=f"liveops-feishu-{run_id}",
                     )
                     await asyncio.sleep(0)
+                def remember_room(selection: dict[str, Any]) -> None:
+                    # Identity is durable even if later metric calculation fails.
+                    # A retry of an old interruption must not repin a newer room.
+                    with SessionLocal() as db:
+                        row = db.get(ShiftSchedule, schedule_id)
+                        current_run = db.get(CollectionRun, run_id)
+                        if row is not None and run_kind != "interruption":
+                            row.live_room_id = selection["live_room_id"]
+                        if current_run is not None:
+                            current_run.result_json = {
+                                **(current_run.result_json or {}), "room_selection": selection,
+                            }
+                        db.commit()
+
                 run_info = await collect_report(
                     settings=settings,
                     schedule=schedule,
@@ -652,6 +666,7 @@ class RunDispatcher:
                     on_captured=on_captured if run_kind != "interruption" else None,
                     interruption_segments=saved_segments,
                     interrupted_at=interrupted_at,
+                    on_room_confirmed=remember_room,
                 )
 
             if run_kind == "interruption":
@@ -802,7 +817,7 @@ class RunDispatcher:
                         "live_room_id", schedule.live_room_id
                     )
                 next_baseline = _baseline_from_report(report)
-                if next_baseline and next_baseline.get("qianchuan"):
+                if next_baseline and next_baseline.get("live_room_id"):
                     next_schedule = db.scalar(
                         select(ShiftSchedule)
                         .where(
@@ -816,9 +831,8 @@ class RunDispatcher:
                     if next_schedule:
                         next_schedule.baseline_json = next_baseline
                         next_schedule.baseline_at = utc_now()
-                        next_schedule.live_room_id = run_info.get(
-                            "live_room_id", next_schedule.live_room_id
-                        )
+                        if not next_schedule.live_room_id:
+                            next_schedule.live_room_id = next_baseline["live_room_id"]
                 if current_run:
                     current_run.result_json = {
                         **(current_run.result_json or {}),
