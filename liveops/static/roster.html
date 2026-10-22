@@ -1358,7 +1358,43 @@ let OPS_POOL = [...DEFAULT_PROMOTERS];
 const allPeople = () => [...new Set([...ANCHOR_POOL,...OPS_POOL])];
 
 /* 人员配色 */
-const PERSON_COLORS = {};
+const PERSON_COLOR_KEY='liveops_roster_person_colors_v1';
+// Keep the original palette independent of private operator names.
+const ANCHOR_COLORS=['#B3D502','#FFC539','#39C39F','#4F83F9','#FF6A9D','#FF8C42','#9B5DE5'];
+const PROMOTER_COLORS=['#C8B8E7','#A3BFEF','#8FD1E1','#FED4A4','#A4DCC1'];
+const PERSON_COLORS=Object.create(null);
+try{
+  const cached=JSON.parse(localStorage.getItem(PERSON_COLOR_KEY)||'{}');
+  if(cached&&typeof cached==='object'&&!Array.isArray(cached)){
+    for(const [name,color] of Object.entries(cached)){
+      if(name.trim()&&typeof color==='string'&&/^#[\da-f]{6}$/i.test(color))PERSON_COLORS[name]=color.toUpperCase();
+    }
+  }
+}catch{}
+function ensurePersonColors(days){
+  const used=new Set(Object.values(PERSON_COLORS));
+  let changed=false;
+  for(const [field,palette] of [['anchor',ANCHOR_COLORS],['ops',PROMOTER_COLORS]]){
+    for(const day of days)for(const shift of day.shifts){
+      const name=String(shift[field]||'').trim();
+      if(!name||PERSON_COLORS[name])continue;
+      const color=palette.find(candidate=>!used.has(candidate))||generatedPersonColor(name);
+      PERSON_COLORS[name]=color;used.add(color);changed=true;
+    }
+  }
+  if(changed)try{localStorage.setItem(PERSON_COLOR_KEY,JSON.stringify(PERSON_COLORS));}catch{}
+}
+function generatedPersonColor(name){
+  let hash=2166136261;
+  for(const character of name)hash=Math.imul(hash^character.codePointAt(0),16777619);
+  const hue=(hash>>>0)%360,saturation=.64,lightness=.66;
+  const a=saturation*Math.min(lightness,1-lightness);
+  const channel=n=>{
+    const k=(n+hue/30)%12;
+    return Math.round(255*(lightness-a*Math.max(-1,Math.min(k-3,9-k,1)))).toString(16).padStart(2,'0');
+  };
+  return `#${channel(0)}${channel(8)}${channel(4)}`.toUpperCase();
+}
 const TIME_TEMPLATES = ["6:00-10:00","7:00-11:30","10:00-14:00","11:30-16:00","14:00-18:00",
   "16:00-20:30","18:00-22:00","20:30-01:00","22:00-02:00"];
 const HOLIDAY = new Set(["2026/10/1","2026/10/2","2026/10/3","2026/10/4","2026/10/5","2026/10/6","2026/10/7"]);
@@ -1419,7 +1455,11 @@ function parsePeople(value,fallback){
 function pendingPeople(){
   try{const value=JSON.parse(localStorage.getItem(PENDING_PEOPLE_KEY)||'null');return value&&Array.isArray(value.anchor)&&Array.isArray(value.ops)?value:null;}catch{return null;}
 }
-function applyPeople(anchor,ops){ANCHOR_POOL=[...anchor];OPS_POOL=[...ops];renderSidebar();}
+function applyPeople(anchor,ops){
+  ANCHOR_POOL=[...anchor];OPS_POOL=[...ops];
+  ensurePersonColors([{shifts:[...anchor.map(name=>({anchor:name})),...ops.map(name=>({ops:name}))]}]);
+  renderAll();
+}
 async function loadPeople(){
   const {settings}=await request('/api/settings');
   const pending=pendingPeople();
@@ -1599,7 +1639,10 @@ async function setMonth(delta){
 }
 
 /* ================= 工具 ================= */
-function colorOf(name){return PERSON_COLORS[name]||"#D8D4E2";}
+function colorOf(name){
+  const normalized=String(name||'').trim();
+  return normalized?(PERSON_COLORS[normalized]||generatedPersonColor(normalized)):"#D8D4E2";
+}
 function textOn(hex){ // 根据底色返回黑/白字
   const h=hex.replace('#','');
   const r=parseInt(h.substr(0,2),16),g=parseInt(h.substr(2,2),16),b=parseInt(h.substr(4,2),16);
@@ -1838,6 +1881,7 @@ function renderSidebar(){
 }
 
 function renderAll(){
+  ensurePersonColors(data.days);
   renderStats();renderSidebar();
   if(view==='list')renderList();else renderWeek();
   document.body.classList.toggle('filtering',!!filterPerson);

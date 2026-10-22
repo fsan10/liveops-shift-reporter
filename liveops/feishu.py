@@ -108,7 +108,9 @@ class FeishuClient:
             "image_count": len(image_keys),
         }
 
-    async def send_alert(self, message: str, alert_open_id: str = "") -> dict[str, Any]:
+    async def send_alert(
+        self, message: str, alert_open_id: str = "", *, title: str = "抖音登录需要处理"
+    ) -> dict[str, Any]:
         if not self.chat_id:
             raise FeishuError("请配置飞书群聊 Chat ID。")
         content = [{"tag": "text", "text": message}]
@@ -120,12 +122,15 @@ class FeishuClient:
                 "receive_id": self.chat_id,
                 "msg_type": "post",
                 "content": json.dumps(
-                    {"zh_cn": {"title": "抖音登录需要处理", "content": [content]}},
+                    {"zh_cn": {"title": title, "content": [content]}},
                     ensure_ascii=False,
                 ),
             },
         )
-        return {"message_id": (payload.get("data") or {}).get("message_id", "")}
+        message_id = (payload.get("data") or {}).get("message_id")
+        if not message_id:
+            raise FeishuError("飞书未返回提醒消息 ID，无法确认提醒送达。")
+        return {"message_id": str(message_id)}
 
     async def send_test_message(self) -> dict[str, Any]:
         if not self.chat_id:

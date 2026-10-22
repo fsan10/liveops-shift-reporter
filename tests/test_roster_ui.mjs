@@ -6,8 +6,8 @@ import vm from 'node:vm';
 // Exercise the actual roster script with an empty/partial browser draft and a fixed Shanghai day.
 const source = readFileSync(new URL('../liveops/static/roster.html', import.meta.url), 'utf8');
 const script = source.match(/<script>([\s\S]*?)<\/script>/)[1];
-async function roster() {
-  const nodes = new Map(), requests = [], scrolls = [], frames = [], storage = new Map();
+async function roster(storage = new Map()) {
+  const nodes = new Map(), requests = [], scrolls = [], frames = [];
   const node = key => {
     if (!nodes.has(key)) {
       const classes = new Set(), listeners = new Map(), attributes = new Map();
@@ -61,6 +61,7 @@ async function roster() {
     globalThis.rosterTest = {
       shiftDates, interruptButtonHTML, isPastDay, emptyMonth, renderList, renderWeek,
       addShift, openCurrentRoster, focusToday, loadRemote, openShiftMenu, openShiftSubmenu, setCalendarShiftField,
+      colorOf, ensurePersonColors, renderAll, applyPeople,
       setData(value) { data=value;serverData=emptyMonth(currentMonth); },
       getData() { return data; },
       setMonth(value) { currentMonth=value; },
@@ -71,6 +72,77 @@ async function roster() {
   await new Promise(resolve => setImmediate(resolve));
   return { ...context.rosterTest, node, storage, requests, scrolls, frames };
 }
+
+test('roster restores the multicolor palette in list, calendar, sidebar and person menu', async () => {
+  const ui = await roster(), data = ui.emptyMonth('2026-10');
+  const anchors = ['主播甲', '主播乙', '主播丙', '主播丁', '主播戊'];
+  const promoters = ['投手甲', '投手乙', '投手丙'];
+  data.days[8].shifts = anchors.map((anchor, index) => ({
+    time: `${6 + index * 3}:00-${9 + index * 3}:00`, anchor, ops: promoters[index % 3],
+  }));
+  ui.setData(data); ui.renderAll();
+  const colors = [...anchors, ...promoters].map(ui.colorOf);
+  assert.equal(new Set(colors).size, 8);
+  assert.deepEqual(colors, ['#B3D502', '#FFC539', '#39C39F', '#4F83F9', '#FF6A9D', '#C8B8E7', '#A3BFEF', '#8FD1E1']);
+  assert.doesNotMatch(ui.node('mainArea').innerHTML, /#D8D4E2/);
+  for (const color of colors) assert.ok(ui.node('mainArea').innerHTML.includes(`background:${color}`));
+  ui.renderWeek();
+  for (const color of colors.slice(0, 5)) assert.ok(ui.node('mainArea').innerHTML.includes(`background:${color}22`));
+  assert.ok(ui.node('anchorStats').innerHTML.includes(`background:${colors[0]}`));
+  ui.applyPeople(anchors, promoters);
+  ui.openShiftMenu(ui.node('card'), 9, 0); ui.openShiftSubmenu('ops');
+  assert.ok(ui.node('shiftPersonOptions').innerHTML.includes(`background:${colors[5]}`));
+});
+
+test('sanitized empty personnel pools preserve the palette for newly configured example staff', async () => {
+  const ui = await roster();
+  ui.applyPeople([], []);
+  ui.applyPeople(['示例主播甲', '示例主播乙'], ['示例投手甲', '示例投手乙']);
+  const names = ['示例主播甲', '示例主播乙', '示例投手甲', '示例投手乙'];
+  const colors = names.map(ui.colorOf);
+  assert.deepEqual(colors, ['#B3D502', '#FFC539', '#C8B8E7', '#A3BFEF']);
+  const data = ui.emptyMonth('2026-10');
+  data.days[8].shifts = [{ time: '06:00-10:00', anchor: names[0], ops: names[2] }];
+  ui.setData(data); ui.renderAll();
+  ui.applyPeople([], []);
+  assert.deepEqual(names.map(ui.colorOf), colors);
+  assert.ok(ui.node('mainArea').innerHTML.includes('background:#B3D502'));
+  ui.renderWeek();
+  assert.ok(ui.node('mainArea').innerHTML.includes('background:#B3D50222'));
+});
+
+test('person colors survive reloads, pool changes and switching to months with different staff order', async () => {
+  const ui = await roster(), data = ui.emptyMonth('2026-10');
+  data.days[8].shifts = [{ anchor: '主播甲', ops: '投手甲' }, { anchor: '主播乙', ops: '投手乙' }];
+  ui.ensurePersonColors(data.days);
+  const before = ['主播甲', '主播乙', '投手甲', '投手乙'].map(ui.colorOf);
+  const reloaded = await roster(ui.storage), nextMonth = ui.emptyMonth('2026-11');
+  nextMonth.days[0].shifts = [{ anchor: '新增主播', ops: '新增投手' }, ...data.days[8].shifts.toReversed()];
+  reloaded.ensurePersonColors(nextMonth.days);
+  reloaded.applyPeople(['新增主播', '主播乙'], ['新增投手']);
+  assert.deepEqual(['主播甲', '主播乙', '投手甲', '投手乙'].map(reloaded.colorOf), before);
+  assert.notEqual(reloaded.colorOf('新增主播'), '#D8D4E2');
+  assert.notEqual(reloaded.colorOf('新增投手'), '#D8D4E2');
+  assert.notEqual(reloaded.colorOf('不在名单的历史人员'), '#D8D4E2');
+  assert.equal(reloaded.colorOf('不在名单的历史人员'), ui.colorOf('不在名单的历史人员'));
+  reloaded.applyPeople(['候选新主播'], ['候选新投手']);
+  const candidateColors = ['候选新主播', '候选新投手'].map(reloaded.colorOf);
+  nextMonth.days[1].shifts = [{ anchor: '候选新主播', ops: '候选新投手' }];
+  reloaded.ensurePersonColors(nextMonth.days);
+  assert.deepEqual(['候选新主播', '候选新投手'].map(reloaded.colorOf), candidateColors);
+});
+
+test('invalid or unavailable browser color cache cannot break roster rendering', async () => {
+  for (const cached of ['broken JSON', 'null', '[]', '{"主播甲":"url(example)","主播乙":42}']) {
+    const storage = new Map([['liveops_roster_person_colors_v1', cached]]), ui = await roster(storage);
+    const data = ui.emptyMonth('2026-10'); data.days[8].shifts = [{ anchor: '主播甲', ops: '投手甲' }];
+    ui.setData(data); ui.renderAll();
+    assert.notEqual(ui.colorOf('主播甲'), '#D8D4E2');
+    assert.match(ui.colorOf('__proto__'), /^#[\dA-F]{6}$/);
+    storage.set = () => { throw new Error('Storage unavailable'); };
+    assert.doesNotThrow(() => ui.ensurePersonColors([{ shifts: [{ anchor: '新增主播' }] }]));
+  }
+});
 
 test('missing, blank, partial and invalid times never crash the interruption renderer', async () => {
   const ui = await roster(), day = { date: '2026/10/9' };

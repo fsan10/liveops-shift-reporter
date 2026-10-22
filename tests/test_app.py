@@ -36,7 +36,7 @@ def test_schedule_ui_uses_roster_prototype_and_inline_controls(client):
     assert 'id="schedule-runs"' not in page
     assert 'id="all-runs"' not in page
     assert 'data-view="runs"' in page
-    assert 'id="roster-frame" src="/static/roster.html?v=20261009-roster-menu"' in page
+    assert 'id="roster-frame" src="/static/roster.html?v=20261022-roster-colors"' in page
     assert 'id="form-room"' not in page
     assert 'id="form-account"' not in page
     assert 'widgets.bundle.js' in page

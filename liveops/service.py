@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
+from liveops.alerts import diagnose_failure
 from liveops.bitable import BitableClient
 from liveops.collector import collect_baseline, collect_report
 from liveops.db import SessionLocal
@@ -339,6 +340,7 @@ class RunDispatcher:
     def __init__(self, settings_store: SettingsStore) -> None:
         self.settings_store = settings_store
         self._browser_lock = asyncio.Lock()
+        self._alert_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._queued: set[tuple[str, int]] = set()
         self._syncing: dict[int, int] = {}
@@ -362,6 +364,83 @@ class RunDispatcher:
                 result["steps"] = [*(result.get("steps") or []), entry]
                 run.result_json = result
                 db.commit()
+
+    async def _notify_run_problem(self, run_id: str, settings: dict[str, str]) -> None:
+        """Send at most one terminal exception alert per run, with durable delivery status."""
+        async with self._alert_lock:
+            with SessionLocal() as db:
+                run = db.get(CollectionRun, run_id)
+                if run is None or run.status not in {"failed", "partial", "succeeded"}:
+                    return
+                result = dict(run.result_json or {})
+                if result.get("exception_alert"):
+                    return
+                # An intentionally provisional manual capture needs no human repair.
+                issues = [item for item in run.missing_fields if not item.startswith("临时快照:")]
+                integrations = result.get("integrations") or {}
+                broken = [name for name, status in integrations.items()
+                          if str(status).startswith(("failed", "partial"))]
+                if run.status != "failed" and not issues and not broken:
+                    return
+                schedule = db.get(ShiftSchedule, run.schedule_id) if run.schedule_id else None
+                steps = result.get("steps") or []
+                failed_stages = list(dict.fromkeys(
+                    step["stage"] for step in steps
+                    if step.get("status") == "failed" and step.get("stage") != "finish"
+                ))
+                if not failed_stages:
+                    failed_stages = [next((step["stage"] for step in reversed(steps)
+                                           if step.get("stage") not in {"finish", "exception_alert"}), "unknown")]
+                labels = {"browser": "浏览器/抖店登录", "room": "场次确认", "detail": "罗盘详情",
+                          "detail_funnel": "漏斗截图", "pro": "专业版", "base": "基础版",
+                          "qianchuan": "千川", "baseline": "交接基线", "metrics": "指标计算",
+                          "feishu": "报告群消息", "bitable": "多维表格", "start": "任务初始化",
+                          "source": "接口解析", "pro_traffic": "流量截图", "pro_anchor": "主播截图",
+                          "base_full": "基础版截图", "qianchuan_full": "千川截图"}
+                stage_text = "、".join(labels.get(stage, "采集/同步") for stage in failed_stages)
+                cause, action = diagnose_failure(run.message if run.status == "failed" else "；".join(issues))
+                if broken:
+                    sync_cause = "同步异常：" + "、".join(labels.get(name, "同步") for name in broken) + "。"
+                    cause = cause + " " + sync_cause if issues or run.status == "failed" else sync_cause
+                    action += " 已保存的数据可在后台重试同步；先查看各同步结果，避免重复发送群报告。"
+                period = (f"{schedule.work_date.isoformat()} {schedule.start_time:%H:%M}–{schedule.end_time:%H:%M}"
+                          if schedule else "无关联排班")
+                host = schedule.host_name if schedule else "未配置"
+                message = (
+                    f"{'采集失败' if run.status == 'failed' else '采集/同步不完整'}，需要人工处理。\n"
+                    f"排班：{period}；主播：{host}\n"
+                    f"异常时间：{now_local():%Y-%m-%d %H:%M:%S}（北京时间）\n"
+                    f"失败环节：{stage_text}；缺失/异常项：{len(issues)}\n"
+                    f"原因判断：{cause}\n处理建议：{action}\n"
+                    f"运行编号：{run.id}（后台采集记录可查看详细错误）"
+                )
+                alert = {"status": "sending", "at": now_local().isoformat()}
+                if not _integration_ready(settings, "feishu"):
+                    alert.update(status="not_configured", error=integration_not_configured_status(settings, "feishu"))
+                run.result_json = {**result, "exception_alert": alert}
+                db.commit()
+            if alert["status"] == "not_configured":
+                self._log_step(run_id, "exception_alert", alert["error"], "skipped")
+                return
+            client = FeishuClient(settings["feishu_app_id"], settings["feishu_app_secret"], settings["feishu_chat_id"])
+            try:
+                async with asyncio.timeout(55):
+                    response = await client.send_alert(
+                        message, settings.get("feishu_alert_open_id", ""), title="直播运营异常提醒"
+                    )
+                alert.update(status="sent", message_id=response["message_id"])
+                self._log_step(run_id, "exception_alert", "异常提醒已发送到飞书群。", "succeeded")
+            except Exception as exc:
+                logger.warning("Exception alert failed for run %s (%s)", run_id, type(exc).__name__)
+                alert.update(status="failed", error="异常提醒发送失败，请检查飞书配置、权限或网络。")
+                self._log_step(run_id, "exception_alert", alert["error"], "failed")
+            finally:
+                with SessionLocal() as db:
+                    current = db.get(CollectionRun, run_id)
+                    if current:
+                        current.result_json = {**(current.result_json or {}), "exception_alert": alert}
+                        db.commit()
+                await client.close()
 
     async def _send_feishu_images(
         self, settings: dict[str, str], caption: str, screenshots: list[dict[str, Any]], run_id: str
@@ -872,13 +951,16 @@ class RunDispatcher:
                         **(current_run.result_json or {}),
                         "integrations": self._integration_status(schedule_id),
                     }
-                    current_run.status = "partial" if missing else "succeeded"
+                    sync_problem = any(str(status).startswith(("failed", "partial"))
+                                       for status in current_run.result_json["integrations"].values())
+                    current_run.status = "partial" if missing or sync_problem else "succeeded"
                     current_run.message = (
-                        "采集完成" if not missing else "采集完成，部分字段或页面缺失；详情见运行记录。"
+                        "采集完成，部分字段、页面或同步异常；详情见运行记录。"
+                        if missing or sync_problem else "采集完成"
                     )
                     current_run.finished_at = utc_now()
                     db.commit()
-            self._log_step(run_id, "finish", "本次采集、群消息和表格同步均已处理完毕。", "succeeded")
+            self._log_step(run_id, "finish", current_run.message, current_run.status)
         except Exception as exc:
             logger.exception("Collection run %s failed", run_id)
             with SessionLocal() as db:
@@ -897,6 +979,11 @@ class RunDispatcher:
             if feishu_task:
                 await asyncio.gather(feishu_task, return_exceptions=True)
         finally:
+            try:
+                await self._notify_run_problem(run_id, settings)
+            except Exception:
+                # Notification must never replace the collection error or block queue cleanup.
+                logger.exception("Unable to record/send exception alert for run %s", run_id)
             if key:
                 self._queued.discard(key)
             if schedule_id is not None:

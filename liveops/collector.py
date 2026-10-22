@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import date, datetime
@@ -8,6 +9,7 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import BrowserContext, Page
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from liveops.douyin_login import DOUYIN_HOME_URL, goto_with_douyin_login
@@ -39,6 +41,7 @@ logger = logging.getLogger(__name__)
 ARTIFACT_ROOT = Path(os.getenv("ARTIFACT_DIR", "var/artifacts"))
 WAIT_AFTER_NAVIGATION_MS = int(os.getenv("PORTAL_SETTLE_MS", "1800"))
 PAGE_TIMEOUT_MS = int(os.getenv("PORTAL_TIMEOUT_MS", "45000"))
+COMPASS_READY_STABLE_SECONDS = 0.75
 CAPTURE_MIN_VIEWPORT = {"width": 1280, "height": 720}
 CAPTURE_FALLBACK_VIEWPORT = {"width": 1920, "height": 1080}
 LIVE_OVERVIEW_URL = "https://compass.jinritemai.com/shop/live-overview"
@@ -380,18 +383,106 @@ async def _fallback_route(context: BrowserContext, kind: str, room_id: str) -> P
     return result
 
 
+async def _overview_payloads(page: Page) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read bodies immediately and wait through Compass SSO document changes."""
+    history_path = "/compass_api/shop/live/live_overview/live_room_detail_v2"
+    loop = asyncio.get_running_loop()
+    generation = 0
+    changed_at = loop.time()
+    payloads: dict[str, dict[str, Any]] = {}
+    request_documents: dict[Any, int] = {}
+    readers: set[asyncio.Task[None]] = set()
+    last_problem = "尚未收到完整场次接口"
+
+    def navigated(frame: Any) -> None:
+        nonlocal generation, changed_at
+        if frame == page.main_frame:
+            generation += 1
+            changed_at = loop.time()
+            payloads.clear()
+
+    async def read(response: Any, path: str, document: int) -> None:
+        nonlocal last_problem
+        try:
+            if response.status != 200:
+                last_problem = f"场次接口 HTTP {response.status}"
+                if generation == document:
+                    payloads.pop(path, None)
+                return
+            body = await response.json()
+            if path == REALTIME_PATH:
+                realtime_rooms(body)
+            else:
+                history_rooms(body)
+            if generation == document:
+                payloads[path] = body
+        except Exception:
+            # Redirected response bodies, login business errors and incomplete
+            # structures are transient candidates, never empty room lists.
+            last_problem = "场次接口正文失效、登录未完成或列表结构无效"
+            if generation == document:
+                payloads.pop(path, None)
+
+    def requested(request: Any) -> None:
+        parsed = urlparse(request.url)
+        if parsed.netloc != "compass.jinritemai.com" or parsed.path not in (REALTIME_PATH, history_path):
+            return
+        request_documents[request] = generation
+
+    def received(response: Any) -> None:
+        document = request_documents.pop(response.request, None)
+        if document is None or document != generation:
+            return
+        task = asyncio.create_task(read(response, urlparse(response.url).path, document))
+        readers.add(task)
+        task.add_done_callback(readers.discard)
+
+    async def attempt() -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            await page.goto(LIVE_OVERVIEW_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        except PlaywrightError as exc:
+            if "ERR_ABORTED" not in str(exc):
+                raise
+            # The site's own SSO navigation can interrupt the requested route.
+        while True:
+            if (urlparse(page.url).path == "/shop/live-overview"
+                    and loop.time() - changed_at >= COMPASS_READY_STABLE_SECONDS
+                    and REALTIME_PATH in payloads and history_path in payloads):
+                return payloads[REALTIME_PATH], payloads[history_path]
+            await asyncio.sleep(0.1)
+
+    page.on("framenavigated", navigated)
+    page.on("request", requested)
+    page.on("response", received)
+    try:
+        for number in range(2):
+            generation += 1
+            payloads.clear()
+            changed_at = loop.time()
+            try:
+                return await asyncio.wait_for(attempt(), timeout=PAGE_TIMEOUT_MS / 1000)
+            except TimeoutError:
+                logger.warning("Compass discovery readiness timed out (attempt %s): %s", number + 1, last_problem)
+        raise RuntimeError(
+            "罗盘登录/场次接口未就绪，等待并重试一次后仍失败：" + last_problem
+            + "。请在保留的罗盘标签页确认登录、验证和访问权限，再重新采集。"
+        )
+    finally:
+        page.remove_listener("response", received)
+        page.remove_listener("request", requested)
+        page.remove_listener("framenavigated", navigated)
+        for task in readers:
+            task.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+
+
 async def _overview_data(context: BrowserContext, start: datetime | None = None, end: datetime | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     page = await _page_for(context, "/shop/live-overview")
     history_path = "/compass_api/shop/live/live_overview/live_room_detail_v2"
-    async with page.expect_response(lambda r: REALTIME_PATH in r.url, timeout=PAGE_TIMEOUT_MS) as active_pending:
-        async with page.expect_response(lambda r: history_path in r.url, timeout=PAGE_TIMEOUT_MS) as history_pending:
-            await page.goto(LIVE_OVERVIEW_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-    active_response, history_response = await active_pending.value, await history_pending.value
-    if active_response.status != 200 or history_response.status != 200:
-        raise RuntimeError("场次发现接口 HTTP 请求失败。")
-    active = realtime_rooms(await active_response.json())
+    active_payload, history_payload = await _overview_payloads(page)
+    active = realtime_rooms(active_payload)
     if start is None:
-        return active, history_rooms(await history_response.json())[0]
+        return active, history_rooms(history_payload)[0]
     rooms: list[dict[str, Any]] = []
     seen: set[str] = set()
     page_no = 1
@@ -914,6 +1005,7 @@ async def collect_report(
         await ensure_shop_login(context, settings)
         if progress:
             progress("browser", "店铺登录状态正常。", "succeeded")
+            progress("room", "确认排班场次；需要发现时等待罗盘登录过渡及有效列表接口。", "info")
         room_discovery = await _report_room(
             context, settings=settings, schedule=schedule, baseline=baseline,
             saved=list(interruption_segments or []), start=start_at, end=end_at,
