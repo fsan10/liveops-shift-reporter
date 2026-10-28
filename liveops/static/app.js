@@ -49,6 +49,7 @@ function missingLabels(items) {
 }
 function stamp(value) { if (!value) return "—"; const iso = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`; return new Date(iso).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }); }
 function dateLabel(value) { return value ? value.replaceAll("-", ".") : ""; }
+function runLabel(run) { return ({ baseline: "千川累计基线", interruption: "中断片段采集", hourly_screenshot: "每小时截图", hourly_watch: "直播状态检查", screenshot_delivery: "截图补发" })[run.kind] || "主播排班任务"; }
 function renderHTML(node, html) { if (renderedHtml.get(node) === html) return; renderedHtml.set(node, html); node.innerHTML = html; }
 function toast(message, error = false) {
   const node = $("#toast"); node.textContent = message; node.style.background = error ? "#b83f4d" : "#18243a"; node.classList.add("show");
@@ -172,7 +173,7 @@ function renderChart(series = []) {
 function renderRuns(runs, target) {
   const rows = runs.slice(0, 6);
   if (!rows.length) { renderHTML(target, empty("暂无运行记录")); return; }
-  renderHTML(target, rows.map(run => `<button class="run-item run-button" data-run-id="${esc(run.id)}" aria-label="查看${run.kind === "baseline" ? "千川起始基线" : run.kind === "interruption" ? "中断片段采集" : "主播时段报告"}详情"><span class="run-icon">${run.kind === "baseline" ? "◷" : "▣"}</span><span class="run-copy"><span class="run-name">${esc(run.kind === "baseline" ? "千川起始基线" : run.kind === "interruption" ? "中断片段采集" : "主播时段报告")}</span><span class="run-time">${esc(stamp(run.started_at || run.created_at))} · ${esc(run.trigger === "scheduler" ? "自动采集" : "人工采集")}</span></span><span class="run-status">${statusLabel(run.status)}</span></button>`).join(""));
+  renderHTML(target, rows.map(run => `<button class="run-item run-button" data-run-id="${esc(run.id)}" aria-label="查看${esc(runLabel(run))}详情"><span class="run-icon">▣</span><span class="run-copy"><span class="run-name">${esc(runLabel(run))}</span><span class="run-time">${esc(stamp(run.started_at || run.created_at))} · ${esc(run.trigger === "scheduler" ? "自动执行" : "人工执行")}</span></span><span class="run-status">${statusLabel(run.status)}</span></button>`).join(""));
 }
 function scheduleTable(items) {
   if (!items.length) return empty("该日期还没有排班。进入排班管理，在日期卡片中添加班次。");
@@ -206,7 +207,7 @@ function reportTable(items) {
 }
 function runsTable(items) {
   if (!items.length) return empty("暂无运行记录。");
-  return `<table class="data-table"><thead><tr><th>开始时间</th><th>完成时间</th><th>任务</th><th>来源</th><th>状态</th><th>说明</th><th>详情</th></tr></thead><tbody>${items.map(run => `<tr><td>${esc(stamp(run.started_at || run.created_at))}</td><td>${esc(stamp(run.finished_at))}</td><td>${run.kind === "baseline" ? "千川累计基线" : run.kind === "interruption" ? "中断片段采集" : "时段数据采集"}</td><td>${run.trigger === "scheduler" ? "自动调度" : "人工触发"}</td><td>${statusLabel(run.status)}</td><td>${esc(run.message || (run.missing_fields || []).join("、") || "—")}</td><td><button class="small-button" data-run-id="${esc(run.id)}">查看</button></td></tr>`).join("")}</tbody></table>`;
+  return `<table class="data-table"><thead><tr><th>开始时间</th><th>完成时间</th><th>任务</th><th>来源</th><th>状态</th><th>说明</th><th>详情</th></tr></thead><tbody>${items.map(run => `<tr><td>${esc(stamp(run.started_at || run.created_at))}</td><td>${esc(stamp(run.finished_at))}</td><td>${esc(runLabel(run))}</td><td>${run.trigger === "scheduler" ? "自动调度" : "人工触发"}</td><td>${statusLabel(run.status)}</td><td>${esc(run.message || (run.missing_fields || []).join("、") || "—")}</td><td><button class="small-button" data-run-id="${esc(run.id)}">查看</button></td></tr>`).join("")}</tbody></table>`;
 }
 async function loadStatus() {
   const result = await api("/api/status");
@@ -253,6 +254,7 @@ async function refreshVisibleView() {
   if (state.view === "schedules") { document.getElementById("roster-frame")?.contentWindow?.postMessage({ type: "liveops:roster-refresh" }, location.origin); return; }
   if (state.view === "reports") return loadReportView();
   if (state.view === "runs") return loadRunsView();
+  if (state.view === "settings") return loadAutomationStatus();
 }
 async function refreshAll() {
   if (state.refreshing) return;
@@ -288,7 +290,11 @@ async function showRun(id) {
     const { item } = await api(`/api/runs/${encodeURIComponent(id)}`); $("#detail-title").textContent = `${item.kind === "baseline" ? "千川累计基线" : "采集运行"} · ${String(item.status).toUpperCase()}`;
     const steps = (item.result?.steps || []).map((step, index) => `<li class="step-item step-${esc(step.status || "info")}"><span class="step-index">${index + 1}</span><div><time>${esc(stamp(step.at))}</time><strong>${esc(step.stage)}</strong><p>${esc(step.description)}</p></div></li>`).join("");
     const result = { ...(item.result || {}) }; delete result.steps;
+    const deliveries = (result.screenshot_deliveries || []).map(row => `<div class="sync-status-item"><strong>${esc(row.target === "hourly" ? "业务每小时群" : "主播群")}</strong><span>${esc(({ sent: "已发送", failed: "发送失败", uncertain: "发送结果待确认，请先核实群内消息", not_configured: "未配置", pending: "等待发送", sending: "发送中" })[row.status] || row.status || row.capture_status)}</span><pre>${esc(row.error || row.message_id || "")}</pre></div>`).join("");
+    const images = (result.screenshots || []).map(shot => `<a class="screenshot-card" href="/artifacts/${esc(shot.relative_path)}" target="_blank" rel="noreferrer"><img src="/artifacts/${esc(shot.relative_path)}" alt="${esc(shot.name)}"><span>${esc(shot.name)}</span></a>`).join("");
     renderHTML($("#detail-content"), `<div class="detail-block"><h4>开始与完成</h4><pre>开始：${esc(stamp(item.started_at || item.created_at))}\n完成：${esc(stamp(item.finished_at))}</pre></div><div class="detail-block"><h4>逐步运行日志</h4><ol class="step-list">${steps || "暂无步骤日志"}</ol></div><div class="detail-block"><h4>运行说明</h4><pre>${esc(item.message || "任务正在执行…")}</pre></div><div class="detail-block"><h4>缺失字段</h4><pre>${esc(missingLabels(item.missing_fields))}</pre></div><details class="detail-block"><summary>结果数据</summary><pre>${esc(JSON.stringify(result, null, 2))}</pre></details>`);
+    if (deliveries) $("#detail-content").insertAdjacentHTML("afterbegin", `<div class="detail-block"><h4>截图发送结果</h4><div class="sync-status-list">${deliveries}</div>${(result.screenshot_deliveries || []).some(row => row.capture_status === "captured" && ["failed", "not_configured"].includes(row.status)) ? `<button class="button button-secondary" data-retry-screenshots="${esc(item.id)}">仅补发未成功的群</button>` : ""}</div>`);
+    if (images) $("#detail-content").insertAdjacentHTML("beforeend", `<div class="detail-block"><h4>本次截图</h4><div class="screenshot-grid">${images}</div></div>`);
     $("#detail-content").scrollTop = 0;
     $("#detail-dialog").showModal();
   } catch (error) { showError(error); }
@@ -367,7 +373,7 @@ function setDate(value) {
 }
 async function loadCollectors() {
   const { items } = await api("/api/collectors");
-  $("#collector-cards").innerHTML = items.map(item => `<article class="collector-card" data-module="${esc(item.code)}"><div class="collector-top"><div><div class="collector-title">${esc(item.name)}</div><div class="collector-sub">${esc(item.page_kind)} · ${esc(item.notes || "")}</div></div><span class="collector-tag">${esc(item.section_label || "页面截图")}</span></div><label>截图方式<select data-module-field="screenshot_mode"><option value="element" ${item.screenshot_mode === "element" ? "selected" : ""}>指定 DOM 元素</option><option value="full_page" ${item.screenshot_mode === "full_page" ? "selected" : ""}>整页截图</option></select></label><label>栏目名称 / 区域标签<input data-module-field="section_label" value="${esc(item.section_label || "")}"></label><label>截图选择器（XPath 或 CSS）<input data-module-field="selector" value="${esc(item.selector || "")}" placeholder="可留空"></label><div class="collector-foot"><label class="toggle"><input data-module-field="enabled" type="checkbox" ${item.enabled ? "checked" : ""}><span class="toggle-track"></span>启用采集</label><button class="button button-secondary" data-module-save="${esc(item.code)}">保存步骤</button></div></article>`).join("");
+  $("#collector-cards").innerHTML = items.map(item => `<article class="collector-card" data-module="${esc(item.code)}"><div class="collector-top"><div><div class="collector-title">${esc(item.name)}</div><div class="collector-sub">${esc(item.page_kind)} · ${esc(item.notes || "")}</div></div><span class="collector-tag">${esc(item.section_label || "页面截图")}</span></div><label>截图方式<select data-module-field="screenshot_mode"><option value="element" ${item.screenshot_mode === "element" ? "selected" : ""}>指定 DOM 元素</option><option value="full_page" ${item.screenshot_mode === "full_page" ? "selected" : ""}>整页截图</option></select></label><label>栏目名称 / 区域标签<input data-module-field="section_label" value="${esc(item.section_label || "")}"></label><label>截图选择器（XPath 或 CSS）<input data-module-field="selector" value="${esc(item.selector || "")}" placeholder="可留空"></label><div class="collector-foot"><label class="toggle"><input data-module-field="enabled" type="checkbox" ${item.enabled ? "checked" : ""}><span class="toggle-track"></span>启用截图</label><button class="button button-secondary" data-module-save="${esc(item.code)}">保存步骤</button></div></article>`).join("");
 }
 async function saveCollector(button) {
   const card = button.closest(".collector-card"), values = {};
@@ -375,23 +381,29 @@ async function saveCollector(button) {
   try { await api(`/api/collectors/${encodeURIComponent(button.dataset.moduleSave)}`, { method: "PATCH", body: JSON.stringify(values) }); toast("采集步骤已保存"); await loadCollectors(); }
   catch (error) { showError(error); }
 }
-  const settingKeys = ["browser_mode", "cloak_profile_name", "cloak_profile_id", "native_user_data_dir", "native_chromium_path", "native_context_options", "shop_name", "live_room_id", "live_author_id", "qianchuan_account_id", "feishu_app_id", "feishu_app_secret", "feishu_chat_id", "feishu_alert_open_id", "bitable_app_token", "bitable_table_id", "bitable_sync_key_field", "bitable_field_mapping", "report_message_template", "settle_delay_seconds", "auto_catchup_minutes"];
+  const settingKeys = ["browser_mode", "cloak_profile_name", "cloak_profile_id", "native_user_data_dir", "native_chromium_path", "native_context_options", "shop_name", "live_room_id", "live_author_id", "qianchuan_account_id", "feishu_app_id", "feishu_app_secret", "feishu_chat_id", "feishu_hourly_chat_id", "feishu_alert_open_id", "bitable_app_token", "bitable_table_id", "bitable_sync_key_field", "bitable_field_mapping", "report_message_template", "hourly_message_template", "data_collection_enabled", "hourly_screenshot_enabled", "anchor_screenshot_enabled", "settle_delay_seconds", "auto_catchup_minutes"];
 async function loadSettings() {
   const { settings } = await api("/api/settings"); state.settings = settings;
-  settingKeys.forEach(key => { const input = document.getElementById(key); if (input && key !== "feishu_app_secret") input.value = settings[key] ?? ""; });
+  settingKeys.forEach(key => { const input = document.getElementById(key); if (input && key !== "feishu_app_secret") { if (input.type === "checkbox") input.checked = settings[key] === "true"; else input.value = settings[key] ?? ""; } });
   $("#feishu_app_secret").placeholder = settings.feishu_app_secret_configured ? settings.feishu_app_secret_masked : "未配置";
   $("#secret-configured").textContent = settings.feishu_app_secret_configured ? `App Secret 已加密保存：${settings.feishu_app_secret_masked}；留空会继续使用已保存的密钥。` : "尚未配置 App Secret。";
   $("#feishu-state").textContent = settings.feishu_app_secret_configured ? "密钥已保存" : "未配置";
+  await loadAutomationStatus();
+}
+async function loadAutomationStatus() {
+  const result = await api("/api/automation/status");
+  $("#automation-clock").textContent = !result.hourly_enabled ? "每小时截图已关闭" : result.observation_failed ? "直播状态检查失败，每小时截图已暂停；请查看采集记录。" : result.next_hourly_at ? `下次小时截图：${stamp(result.next_hourly_at)} · 场次 ${result.room_id}` : "等待确认正在直播的场次；开播满一小时后截图。";
+  $("#automation-recent").innerHTML = (result.recent_requests || []).slice(0, 5).map(item => `<div><span>${esc(item.target === "hourly" ? "每小时截图" : "主播时段截图")} · ${esc(stamp(item.planned_at))}</span><span>${esc(({ pending: "等待执行", capturing: "截图中", captured: "已截图", missed: "已漏拍", failed: "截图失败", skipped: "已跳过" })[item.status] || item.status)}${item.status === "captured" ? ` · ${esc(({ sent: "已发送", failed: "发送失败", uncertain: "发送待确认", not_configured: "群未配置", pending: "等待发送", sending: "发送中" })[item.delivery_status] || item.delivery_status)}` : ""}</span></div>`).join("");
 }
 async function saveSettings() {
   const values = {};
-  settingKeys.forEach(key => { const input = document.getElementById(key); if (input) values[key] = input.value; });
+  settingKeys.forEach(key => { const input = document.getElementById(key); if (input) values[key] = input.type === "checkbox" ? String(input.checked) : input.value; });
   try { const result = await api("/api/settings", { method: "PUT", body: JSON.stringify({ values }) }); state.settings = result.settings; toast("配置已加密保存"); await loadSettings(); await loadStatus(); }
   catch (error) { showError(error); }
 }
-async function checkFeishu(send = false) {
-  const button = send ? $("#test-feishu") : $("#check-feishu"); button.disabled = true;
-  try { const result = await api(`/api/integrations/feishu/${send ? "send-test" : "check"}`, { method: "POST" }); $("#feishu-state").textContent = send ? "测试消息已发" : "凭证有效"; toast(send ? "测试消息已发送到群聊" : `应用凭证有效${result.chat_id_configured ? "，群聊已配置" : "，尚未填写 Chat ID"}`); }
+async function checkFeishu(send = false, target = "anchor") {
+  const button = send ? $(target === "hourly" ? "#test-feishu-hourly" : "#test-feishu") : $("#check-feishu"); button.disabled = true;
+  try { const result = await api(`/api/integrations/feishu/${send ? `send-test?target=${target}` : "check"}`, { method: "POST" }); $("#feishu-state").textContent = send ? "测试消息已发" : "凭证有效"; toast(send ? `测试消息已发送到${target === "hourly" ? "业务每小时群" : "主播群"}` : `应用凭证有效${result.chat_id_configured ? "，主播群已配置" : "，尚未填写主播群 Chat ID"}`); }
   catch (error) { $("#feishu-state").textContent = "检查失败"; showError(error); } finally { button.disabled = false; }
 }
 async function checkBitable() {
@@ -443,7 +455,7 @@ window.liveopsPaginationChange = (key, page, pageSize) => {
   }
   changePage(key, page);
 };
-document.addEventListener("click", event => {
+document.addEventListener("click", async event => {
   const calendarDay = event.target.closest("[data-calendar-date]");
   if (calendarDay && openDatePicker) {
     const input = openDatePicker.input;
@@ -479,6 +491,7 @@ document.addEventListener("click", event => {
   if (nav) { setView(nav.dataset.view || nav.dataset.nav); return; }
   const report = event.target.closest("[data-report-id]"); if (report) { showReport(report.dataset.reportId); return; }
   const run = event.target.closest("[data-run-id]"); if (run) { showRun(run.dataset.runId); return; }
+  const retry = event.target.closest("[data-retry-screenshots]"); if (retry) { retry.disabled = true; try { await api(`/api/runs/${encodeURIComponent(retry.dataset.retryScreenshots)}/retry-screenshots`, { method: "POST" }); toast("已开始补发，已成功的群不会重复发送"); $("#detail-dialog").close(); await refreshAll(); } catch (error) { showError(error); retry.disabled = false; } return; }
   const moduleSave = event.target.closest("[data-module-save]"); if (moduleSave) { saveCollector(moduleSave); return; }
   if (event.target.closest("[data-close-dialog]")) { event.target.closest("dialog")?.close(); }
 });
@@ -505,6 +518,7 @@ document.addEventListener("keydown", event => {
 $("#go-schedules").addEventListener("click", () => setView("schedules"));
 $("#refresh-button").addEventListener("click", refreshAll); $("#refresh-collectors").addEventListener("click", () => loadCollectors().catch(showError));
 $("#save-settings").addEventListener("click", saveSettings); $("#check-feishu").addEventListener("click", () => checkFeishu(false)); $("#test-feishu").addEventListener("click", () => checkFeishu(true)); $("#check-bitable").addEventListener("click", checkBitable); $("#load-fields").addEventListener("click", loadBitableFields); $("#export-csv").addEventListener("click", exportCsv);
+$("#test-feishu-hourly").addEventListener("click", () => checkFeishu(true, "hourly"));
 [["#overview-date", "overview"], ["#reports-date", "reports"]].forEach(([selector, view]) => $(selector).addEventListener("change", async event => { setPickerValue(event.target.id, event.target.value); setDate(event.target.value); if (view === "reports") state.pagination.reports.page = 1; try { await refreshVisibleView(); } catch (error) { showError(error); } }));
 $("#detail-dialog").addEventListener("close", closeDatePicker);
 window.addEventListener("resize", closeDatePicker);

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from liveops.alerts import diagnose_failure
+from liveops.automation import ScreenshotAutomation
 from liveops.bitable import BitableClient
 from liveops.collector import collect_baseline, collect_report
 from liveops.db import SessionLocal
@@ -20,13 +21,14 @@ from liveops.formulas import FORMULA_VERSION, build_report_metrics
 from liveops.models import (
     CollectionRun,
     CollectorModule,
+    ScreenshotRequest,
     ShiftInterruption,
     ShiftReport,
     ShiftSchedule,
 )
 from liveops.portal import qianchuan_snapshot, report_source_values
 from liveops.segments import recompute_segments
-from liveops.settings import SettingsStore, db_settings
+from liveops.settings import SettingsStore, db_settings, screenshot_chat, setting_enabled
 from liveops.snapshots import (
     aggregate_daily_room_exposure,
     capture_snapshot,
@@ -336,7 +338,7 @@ def integration_not_configured_status(settings: dict[str, str], integration: str
     return "not_configured: 尚缺 " + "、".join(missing)
 
 
-class RunDispatcher:
+class RunDispatcher(ScreenshotAutomation):
     def __init__(self, settings_store: SettingsStore) -> None:
         self.settings_store = settings_store
         self._browser_lock = asyncio.Lock()
@@ -349,6 +351,30 @@ class RunDispatcher:
         self._bitable_retention_checked_month = ""
         self._bitable_retention_retry_at: datetime | None = None
         self._scheduler_task: asyncio.Task[Any] | None = None
+        self._init_screenshots()
+
+    def _automation_db(self) -> Any:
+        return SessionLocal()
+
+    def _automation_now(self) -> datetime:
+        return now_local()
+
+    def _schedule_room_id(self, db: Any, schedule: ShiftSchedule | None) -> str:
+        if schedule is None:
+            return ""
+        if schedule.live_room_id:
+            return schedule.live_room_id
+        if (schedule.baseline_json or {}).get("live_room_id"):
+            return schedule.baseline_json["live_room_id"]
+        previous = _previous_shift(db, schedule)
+        return previous.live_room_id if previous else ""
+
+    def _remember_screenshot_room(self, schedule_id: int, room_id: str) -> None:
+        with SessionLocal() as db:
+            schedule = db.get(ShiftSchedule, schedule_id)
+            if schedule:
+                schedule.live_room_id = room_id
+            db.commit()
 
     def _log_step(self, run_id: str, stage: str, description: str, status: str = "info") -> None:
         entry = {
@@ -366,6 +392,30 @@ class RunDispatcher:
                 db.commit()
 
     async def _notify_run_problem(self, run_id: str, settings: dict[str, str]) -> None:
+        with SessionLocal() as db:
+            run = db.get(CollectionRun, run_id)
+            result = dict(run.result_json or {}) if run else {}
+            targets = list(result.get("screenshot_targets") or [])
+            receipts = self._delivery_summary(run_id)
+        if not targets:
+            await self._notify_single_run_problem(run_id, settings)
+            return
+        # A successful hourly image delivery must not inherit a shift metric error.
+        if "hourly" in targets and any(row["target"] == "hourly" and row.get("status") == "sent" for row in receipts):
+            targets.remove("hourly")
+        if result.get("data_collection") != "disabled" and run and run.schedule_id and "anchor" not in targets:
+            targets.append("anchor")
+        destinations: set[str] = set()
+        for index, target in enumerate(targets):
+            chat = screenshot_chat(settings, target)
+            if chat in destinations:
+                continue
+            destinations.add(chat)
+            await self._notify_single_run_problem(run_id, {**settings, "feishu_chat_id": chat},
+                "exception_alert" if index == 0 else f"exception_alert_{target}")
+
+    async def _notify_single_run_problem(self, run_id: str, settings: dict[str, str],
+                                        receipt_key: str = "exception_alert") -> None:
         """Send at most one terminal exception alert per run, with durable delivery status."""
         async with self._alert_lock:
             with SessionLocal() as db:
@@ -373,7 +423,7 @@ class RunDispatcher:
                 if run is None or run.status not in {"failed", "partial", "succeeded"}:
                     return
                 result = dict(run.result_json or {})
-                if result.get("exception_alert"):
+                if result.get(receipt_key):
                     return
                 # An intentionally provisional manual capture needs no human repair.
                 issues = [item for item in run.missing_fields if not item.startswith("临时快照:")]
@@ -396,16 +446,19 @@ class RunDispatcher:
                           "qianchuan": "千川", "baseline": "交接基线", "metrics": "指标计算",
                           "feishu": "报告群消息", "bitable": "多维表格", "start": "任务初始化",
                           "source": "接口解析", "pro_traffic": "流量截图", "pro_anchor": "主播截图",
-                          "base_full": "基础版截图", "qianchuan_full": "千川截图"}
+                           "base_full": "基础版截图", "qianchuan_full": "千川截图",
+                           "feishu_anchor": "主播群截图", "feishu_hourly": "业务群截图", "screenshots": "页面截图"}
                 stage_text = "、".join(labels.get(stage, "采集/同步") for stage in failed_stages)
                 cause, action = diagnose_failure(run.message if run.status == "failed" else "；".join(issues))
+                if schedule is None:
+                    action = action.replace("重新采集该排班", "确认后等待下一小时截图").replace("排班", "对应运行")
                 if broken:
                     sync_cause = "同步异常：" + "、".join(labels.get(name, "同步") for name in broken) + "。"
                     cause = cause + " " + sync_cause if issues or run.status == "failed" else sync_cause
                     action += " 已保存的数据可在后台重试同步；先查看各同步结果，避免重复发送群报告。"
                 period = (f"{schedule.work_date.isoformat()} {schedule.start_time:%H:%M}–{schedule.end_time:%H:%M}"
-                          if schedule else "无关联排班")
-                host = schedule.host_name if schedule else "未配置"
+                          if schedule else "每小时直播截图（独立于主播排班）")
+                host = schedule.host_name if schedule else "无需主播排班"
                 message = (
                     f"{'采集失败' if run.status == 'failed' else '采集/同步不完整'}，需要人工处理。\n"
                     f"排班：{period}；主播：{host}\n"
@@ -417,7 +470,7 @@ class RunDispatcher:
                 alert = {"status": "sending", "at": now_local().isoformat()}
                 if not _integration_ready(settings, "feishu"):
                     alert.update(status="not_configured", error=integration_not_configured_status(settings, "feishu"))
-                run.result_json = {**result, "exception_alert": alert}
+                run.result_json = {**result, receipt_key: alert}
                 db.commit()
             if alert["status"] == "not_configured":
                 self._log_step(run_id, "exception_alert", alert["error"], "skipped")
@@ -438,7 +491,7 @@ class RunDispatcher:
                 with SessionLocal() as db:
                     current = db.get(CollectionRun, run_id)
                     if current:
-                        current.result_json = {**(current.result_json or {}), "exception_alert": alert}
+                        current.result_json = {**(current.result_json or {}), receipt_key: alert}
                         db.commit()
                 await client.close()
 
@@ -469,6 +522,11 @@ class RunDispatcher:
 
     def start_scheduler(self) -> None:
         if self._scheduler_task is None or self._scheduler_task.done():
+            self._recover_screenshot_requests()
+            for run_id in self._recovered_screenshot_runs:
+                task = asyncio.create_task(self._notify_recovered_screenshot_run(run_id))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
             self._scheduler_task = asyncio.create_task(
                 self.scheduler_loop(), name="liveops-scheduler"
             )
@@ -503,6 +561,16 @@ class RunDispatcher:
                 when = "历史" if schedule.work_date < today else "未来"
                 raise RuntimeError(f"{when}排班不允许手动执行采集任务，请选择当天排班。")
             request_data: dict[str, Any] = {}
+            values = db_settings(db, self.settings_store)
+            if trigger == "scheduler":
+                previous_report = db.scalar(select(ShiftReport).where(ShiftReport.schedule_id == schedule_id))
+                if previous_report and (previous_report.raw_json or {}).get("is_final", True):
+                    request_data["data_collection"] = "disabled"
+            if kind == "interruption" and not setting_enabled(values, "data_collection_enabled"):
+                raise RuntimeError("获取数据已关闭，无法采集并保存中断数据片段。")
+            if kind == "report" and not (setting_enabled(values, "data_collection_enabled")
+                                         or setting_enabled(values, "anchor_screenshot_enabled")):
+                raise RuntimeError("获取数据和主播时段截图均已关闭。")
             if kind == "interruption":
                 if not schedule.enabled:
                     raise RuntimeError("停用的排班不能标记中断。")
@@ -559,6 +627,12 @@ class RunDispatcher:
                 )
             ).all()
             schedules.sort(key=lambda item: (item.work_date, item.start_time))
+        await self._check_hourly_clock(values, now, schedules)
+        await self._reuse_hourly_captures(values)
+        now = now_local()
+        data_enabled = setting_enabled(values, "data_collection_enabled")
+        anchor_enabled = setting_enabled(values, "anchor_screenshot_enabled")
+        with SessionLocal() as db:
             due: list[tuple[int, str]] = []
             for schedule in schedules:
                 end_at = schedule_end(schedule)
@@ -572,19 +646,24 @@ class RunDispatcher:
                 provisional = raw.get("is_final") is False
                 if "is_final" not in raw and raw.get("collected_at"):
                     provisional = datetime.fromisoformat(raw["collected_at"]) < end_at
+                anchor = db.get(ScreenshotRequest, f"anchor:{schedule.id}")
+                # Legacy final reports already delivered their anchor screenshot.
+                anchor_needed = anchor_enabled and (
+                    anchor.status in {"pending", "failed"} if anchor else report is None or provisional
+                )
+                hourly_needed = (data_enabled or anchor_enabled) and bool(self._shared_hourly_requests(db, schedule, values))
                 if (
-                    (report is None or provisional)
+                    ((data_enabled and (report is None or provisional)) or anchor_needed or hourly_needed)
                     and ready_at <= now
                     and 0 <= report_age <= catchup_minutes * 60
                     and not self._recent_attempt(report_key, now)
                 ):
                     due.append((schedule.id, "report"))
-                    self._last_auto_attempt[report_key] = now
             db.commit()
 
         month_key = now.strftime("%Y-%m")
         if (
-            _integration_ready(values, "bitable")
+            data_enabled and _integration_ready(values, "bitable")
             and self._bitable_retention_checked_month != month_key
             and (
                 self._bitable_retention_retry_at is None or now >= self._bitable_retention_retry_at
@@ -606,12 +685,14 @@ class RunDispatcher:
 
         for schedule_id, kind in due:
             key = (kind, schedule_id)
-            if key in self._queued or self._browser_lock.locked():
+            if self._queued or self._browser_lock.locked():
                 continue
             try:
                 await self.begin_run(schedule_id, kind, "scheduler")
+                self._last_auto_attempt[key] = now
             except (ValueError, RuntimeError):
                 continue
+        await self._dispatch_hourly_requests(values, schedules, now)
 
     def _recent_attempt(self, key: tuple[str, int], now: datetime) -> bool:
         previous = self._last_auto_attempt.get(key)
@@ -637,12 +718,26 @@ class RunDispatcher:
             run.status = "running"
             run.started_at = utc_now()
             db.commit()
-        self._log_step(run_id, "start", "开始执行主播时段采集。", "succeeded")
+        self._log_step(run_id, "start", "开始执行调度任务。", "succeeded")
 
-        key = (run_kind, schedule_id) if schedule_id is not None else None
+        key = (run_kind, schedule_id) if schedule_id is not None else (run_kind, 0)
         try:
-            if schedule is None:
+            if schedule is None and run_kind != "hourly_screenshot":
                 raise RuntimeError("当前运行任务没有关联排班。")
+            screenshot_ids = self._claim_screenshot_requests(run_id, schedule, settings)
+            data_enabled = (setting_enabled(settings, "data_collection_enabled") and run_kind != "hourly_screenshot"
+                            and (run.result_json or {}).get("data_collection") != "disabled")
+            if not data_enabled:
+                if screenshot_ids:
+                    await self._execute_screenshot_only(run_id, schedule, settings)
+                else:
+                    with SessionLocal() as db:
+                        current_run = db.get(CollectionRun, run_id)
+                        current_run.status = "skipped"
+                        current_run.message = "相关功能已关闭，本次任务未执行。"
+                        current_run.finished_at = utc_now()
+                        db.commit()
+                return
             if run_kind == "baseline":
                 async with self._browser_lock:
                     baseline_value = await collect_baseline(
@@ -698,27 +793,22 @@ class RunDispatcher:
                         f"按直播场次读取上一位的快照，来源运行：{baseline.get('source_run_id', '缺失')}；缺少基线不影响分钟金额采集。",
                         "info" if baseline.get("source") == "previous_shift_missing" else "succeeded",
                     )
-                caption_template = schedule.message_template or settings.get(
-                    "report_message_template", "以上主播{host_name}{start_time}-{end_time}点的直播数据"
-                )
-                caption_needs_metrics = any(
-                    "{" + field + "}" in caption_template
-                    for field in ("duration_hours", "gmv", "overall_amount", "overall_roi")
-                )
+                confirmed_room_id = schedule.live_room_id
                 async def on_captured(images: list[dict[str, Any]]) -> None:
                     nonlocal feishu_task
-                    if caption_needs_metrics:
-                        self._log_step(
-                            run_id, "feishu", "消息模板引用报表指标，待指标计算后发送截图。"
-                        )
+                    if not screenshot_ids:
                         return
-                    caption = _format_caption(caption_template, schedule, {})
+                    room_id = confirmed_room_id or next((item.get("live_room_id") for item in reversed(images)
+                                                          if item.get("live_room_id")), "")
+                    self._save_screenshot_capture(run_id, images, room_id)
                     feishu_task = asyncio.create_task(
-                        self._send_feishu_images(settings, caption, images, run_id),
+                        self._deliver_screenshot_requests(run_id, settings, data_pending=True),
                         name=f"liveops-feishu-{run_id}",
                     )
                     await asyncio.sleep(0)
                 def remember_room(selection: dict[str, Any]) -> None:
+                    nonlocal confirmed_room_id
+                    confirmed_room_id = selection["live_room_id"]
                     # Identity is durable even if later metric calculation fails.
                     # A retry of an old interruption must not repin a newer room.
                     with SessionLocal() as db:
@@ -746,7 +836,11 @@ class RunDispatcher:
                     interruption_segments=saved_segments,
                     interrupted_at=interrupted_at,
                     on_room_confirmed=remember_room,
+                    screenshots_enabled=bool(screenshot_ids) or (
+                        run_kind == "interruption" and setting_enabled(settings, "anchor_screenshot_enabled")),
                 )
+                if screenshot_ids and feishu_task is None:
+                    await on_captured(run_info["screenshots"])
 
             if run_kind == "interruption":
                 segment = run_info["segments"][-1]
@@ -826,12 +920,11 @@ class RunDispatcher:
                 )
             run_info["metrics"] = metrics
             run_info["missing_fields"] = missing
-            if feishu_task is None and caption_needs_metrics:
+            if feishu_task:
+                await feishu_task
+            if screenshot_ids:
                 feishu_task = asyncio.create_task(
-                    self._send_feishu_images(
-                        settings, _format_caption(caption_template, schedule, metrics),
-                        list(run_info["screenshots"]), run_id,
-                    ),
+                    self._deliver_screenshot_requests(run_id, settings, metrics=metrics),
                     name=f"liveops-feishu-{run_id}",
                 )
             self._log_step(
@@ -879,7 +972,8 @@ class RunDispatcher:
                 report.screenshots_json = run_info["screenshots"]
                 report.missing_fields = missing
                 report.feishu_status = (
-                    integration_not_configured_status(settings, "feishu")
+                    "disabled: 主播时段截图已关闭" if not setting_enabled(settings, "anchor_screenshot_enabled")
+                    else integration_not_configured_status(settings, "feishu")
                     if not _integration_ready(settings, "feishu")
                     else "pending"
                 )
@@ -942,7 +1036,7 @@ class RunDispatcher:
                     settings,
                     run_id,
                     feishu_task if target_id == schedule_id else None,
-                    send_feishu=target_id == schedule_id,
+                    send_feishu=target_id == schedule_id and bool(screenshot_ids),
                 )
             with SessionLocal() as db:
                 current_run = db.get(CollectionRun, run_id)
@@ -951,6 +1045,13 @@ class RunDispatcher:
                         **(current_run.result_json or {}),
                         "integrations": self._integration_status(schedule_id),
                     }
+                    for receipt in self._delivery_summary(run_id):
+                        if receipt["target"] == "hourly":
+                            status = receipt.get("status", "pending")
+                            current_run.result_json = {**current_run.result_json, "integrations": {
+                                **current_run.result_json["integrations"],
+                                "hourly_screenshots": "failed: 发送结果待确认" if status == "uncertain" else status,
+                            }}
                     sync_problem = any(str(status).startswith(("failed", "partial"))
                                        for status in current_run.result_json["integrations"].values())
                     current_run.status = "partial" if missing or sync_problem else "succeeded"
@@ -976,6 +1077,13 @@ class RunDispatcher:
                         }
                     db.commit()
             self._log_step(run_id, "finish", f"采集失败：{str(exc)[:300]}", "failed")
+            with SessionLocal() as db:
+                for request in db.scalars(select(ScreenshotRequest).where(
+                    ScreenshotRequest.run_id == run_id, ScreenshotRequest.status == "capturing"
+                )).all():
+                    request.status = "failed"
+                    request.delivery_json = {"status": "failed", "error": "截图执行失败，请查看运行日志。"}
+                db.commit()
             if feishu_task:
                 await asyncio.gather(feishu_task, return_exceptions=True)
         finally:

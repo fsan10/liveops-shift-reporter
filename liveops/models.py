@@ -164,3 +164,33 @@ class ShiftInterruption(Base):
     interrupted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     capture_json: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class HourlyWatch(Base):
+    """Only room identity and the hourly clock; never metric/baseline snapshots."""
+
+    __tablename__ = "hourly_watches"
+
+    scope: Mapped[str] = mapped_column(String(64), primary_key=True)
+    room_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    next_hour: Mapped[int] = mapped_column(Integer, default=1)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ScreenshotRequest(Base):
+    """One intended screenshot delivery, optionally sharing another request's capture."""
+
+    __tablename__ = "screenshot_requests"
+
+    id: Mapped[str] = mapped_column(String(180), primary_key=True)
+    target: Mapped[str] = mapped_column(String(16))  # anchor, hourly
+    schedule_id: Mapped[int | None] = mapped_column(ForeignKey("shift_schedules.id"), nullable=True, index=True)
+    planned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    room_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    account_id: Mapped[str] = mapped_column(String(40), default="")
+    hour_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("collection_runs.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    screenshots_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    delivery_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

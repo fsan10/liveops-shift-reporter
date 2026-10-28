@@ -211,6 +211,40 @@ async def test_qianchuan_keeps_its_existing_full_page_viewport(monkeypatch, tmp_
     assert page.viewport == {"width": 615, "height": 418}
 
 
+async def test_screenshot_only_discards_page_responses_and_never_builds_snapshots(monkeypatch):
+    from contextlib import asynccontextmanager
+
+    room = {"live_room_id": "123", "author_id": "author", "is_living": True}
+    context = object()
+    calls = []
+
+    @asynccontextmanager
+    async def browser(_settings):
+        yield None, None, context
+
+    async def ready(*args, **kwargs):
+        return room
+
+    async def capture(current, **kwargs):
+        assert current is context and kwargs["collect_data"] is False and kwargs["screenshots"] is True
+        calls.append(kwargs)
+        return [{"secret_metric_response": 999}], [{"name": "截图"}], []
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("screenshot-only must not compute a snapshot or baseline")
+
+    monkeypatch.setattr(collector_module, "browser_context", browser)
+    monkeypatch.setattr(collector_module, "ensure_shop_login", ready)
+    monkeypatch.setattr(collector_module, "_read_room_identity", ready)
+    monkeypatch.setattr(collector_module, "_capture_report_pages", capture)
+    monkeypatch.setattr(collector_module, "capture_snapshot", forbidden)
+    monkeypatch.setattr(collector_module, "handoff_source", forbidden)
+    result = await collector_module.collect_screenshots(settings={}, room=room, modules=[{
+        "code": "base_full", "enabled": True}], run_id="only-screenshots")
+    assert len(calls) == 1 and result["screenshots"][0]["live_room_id"] == "123"
+    assert not ({"responses", "source", "metrics", "snapshot", "baseline"} & result.keys())
+
+
 @pytest.mark.parametrize("failure_mode", ["never", "always", "reused_once"])
 async def test_report_tabs_stay_open_and_are_reused_even_after_page_failure(monkeypatch, failure_mode):
     class Page(NavigationPage):

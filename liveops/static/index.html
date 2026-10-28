@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#0b1220">
   <title>直播运营数据台</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/automation.css">
 </head>
 <body>
   <div class="app-shell">
@@ -73,19 +74,27 @@
           </article>
           <article class="panel settings-card"><div class="panel-heading"><div><h3>飞书群机器人</h3><p>使用企业自建应用机器人，将报告说明和页面截图发到群聊。</p></div><span id="feishu-state" class="state-pill">未检查</span></div>
             <label>App ID<input id="feishu_app_id" autocomplete="off"></label><label>App Secret<input id="feishu_app_secret" type="password" autocomplete="new-password" placeholder="未配置"></label><small class="field-help" id="secret-configured"></small>
-              <label>群聊 Chat ID<input id="feishu_chat_id" placeholder="oc_…"></label>
+              <label>主播群 Chat ID<input id="feishu_chat_id" placeholder="oc_…"></label>
+              <label>业务每小时群 Chat ID<input id="feishu_hourly_chat_id" placeholder="单独填写业务群 oc_…"></label>
               <label>登录/滑块负责人 Open ID<input id="feishu_alert_open_id" placeholder="ou_…；提醒时自动 @"></label>
             <label>报告文字模板<textarea id="report_message_template" rows="2"></textarea></label><small class="field-help">可用变量：{host_name}、{promoter}、{date}、{start_time}、{end_time}、{duration_hours}、{gmv}、{overall_amount}、{overall_roi}</small>
-            <div class="button-row"><button class="button button-secondary" id="check-feishu">检查应用凭证</button><button class="button button-secondary" id="test-feishu">发送测试消息</button></div>
+            <label>每小时截图文字模板<textarea id="hourly_message_template" rows="3"></textarea></label><small class="field-help">可用变量：{hour_index}、{shop_name}、{live_room_id}、{planned_time}、{captured_time}</small>
+            <div class="button-row"><button class="button button-secondary" id="check-feishu">检查应用凭证</button><button class="button button-secondary" id="test-feishu">测试主播群</button><button class="button button-secondary" id="test-feishu-hourly">测试业务群</button></div>
           </article>
           <article class="panel settings-card"><div class="panel-heading"><div><h3>飞书多维表格</h3><p>多维表格只保留本月热数据；完整历史持续保存在本地数据库。</p></div><span id="bitable-state" class="state-pill">未检查</span></div>
             <label>多维表格 app_token<input id="bitable_app_token"></label><label>数据表 table_id<input id="bitable_table_id"></label><label>幂等键列名<input id="bitable_sync_key_field" placeholder="SourceID"></label>
             <label>字段映射（JSON）<textarea id="bitable_field_mapping" rows="11" spellcheck="false"></textarea></label>
             <div class="button-row"><button class="button button-secondary" id="check-bitable">检查表格权限</button><button class="button button-secondary" id="load-fields">读取表头</button></div><div id="bitable-fields" class="field-chips"></div>
           </article>
-          <article class="panel settings-card"><div class="panel-heading"><div><h3>自动调度</h3><p>按服务本地时区运行；失败任务保留，可从排班页人工重试。</p></div></div>
+          <article class="panel settings-card"><div class="panel-heading"><div><h3>自动调度</h3><p>按北京时间运行；数据、每小时截图和主播时段截图独立控制。</p></div></div>
+            <div class="automation-switches">
+              <label class="automation-switch"><span><strong>获取数据</strong><small>按主播排班结束时间采集指标和基线，保存报表并同步多维表格。</small></span><input id="data_collection_enabled" type="checkbox" role="switch"></label>
+              <label class="automation-switch"><span><strong>每小时截图</strong><small>从实际开播满一小时起截图，发送业务群；不采集指标或基线。</small></span><input id="hourly_screenshot_enabled" type="checkbox" role="switch"></label>
+              <label class="automation-switch"><span><strong>主播时段截图</strong><small>按排班结束时间截图并发送主播群；关闭不影响数据采集。</small></span><input id="anchor_screenshot_enabled" type="checkbox" role="switch"></label>
+            </div>
             <label>时区<input id="timezone-display" value="Asia/Shanghai" readonly></label><label>结束后等待（秒）<input id="settle_delay_seconds" type="number" min="0" max="3600"></label><label>错过时间后的补采窗口（分钟）<input id="auto_catchup_minutes" type="number" min="0" max="1440"></label>
-            <div class="notice notice-green"><strong>时间点自动化</strong><span>每个时段结束后自动采集；首位以 0 为基线，后续时段取上一位最后一次采集快照。停止服务期间错过的时段只会在补采窗口内尝试。</span></div>
+            <p id="automation-clock" class="field-help" aria-live="polite"></p><div id="automation-recent" class="automation-recent"></div>
+            <div class="notice notice-green"><strong>同一时点共用截图</strong><span>每小时截图与主播排班结束时间重合时，只截一套图，分别发送到已开启的对应群。主播截图沿用结束后等待设置；小时截图错过超过 5 分钟只记录漏拍，不补造历史图片。</span></div>
           </article>
         </div>
       </section>

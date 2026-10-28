@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from liveops.automation import watch_scope
 from liveops.bitable import BitableClient
 from liveops.collector import DEFAULT_MODULES
 from liveops.db import SessionLocal, init_db
@@ -24,7 +25,9 @@ from liveops.formulas import REPORT_COLUMNS
 from liveops.models import (
     CollectionRun,
     CollectorModule,
+    HourlyWatch,
     ScheduleDay,
+    ScreenshotRequest,
     ShiftInterruption,
     ShiftReport,
     ShiftSchedule,
@@ -32,7 +35,14 @@ from liveops.models import (
 from liveops.portal import schedule_end_datetime, shift_datetime
 from liveops.security import SecretBox
 from liveops.service import RunDispatcher, now_local, schedule_end, schedule_start
-from liveops.settings import DEFAULT_SETTINGS, SECRET_KEYS, SettingsStore, db_settings
+from liveops.settings import (
+    BOOLEAN_SETTINGS,
+    DEFAULT_SETTINGS,
+    SECRET_KEYS,
+    SettingsStore,
+    db_settings,
+    screenshot_chat,
+)
 
 
 class ScheduleInput(BaseModel):
@@ -622,7 +632,7 @@ async def delete_schedule(schedule_id: int) -> dict[str, bool]:
         _require_editable_schedule_date(schedule.work_date)
         if db.scalar(select(ShiftReport.id).where(ShiftReport.schedule_id == schedule_id)) or db.scalar(
             select(ShiftInterruption.id).where(ShiftInterruption.schedule_id == schedule_id)
-        ):
+        ) or db.scalar(select(ScreenshotRequest.id).where(ScreenshotRequest.schedule_id == schedule_id)):
             raise HTTPException(
                 status_code=409, detail="该排班已有报告，不能直接删除；请停用排班以保留审计记录。"
             )
@@ -803,6 +813,38 @@ async def get_settings(request: Request) -> dict[str, Any]:
         return {"settings": _store(request).public(db), "secret_keys": sorted(SECRET_KEYS)}
 
 
+@app.get("/api/automation/status")
+async def automation_status(request: Request) -> dict[str, Any]:
+    from liveops.sessions import local_datetime
+
+    with _db() as db:
+        values = db_settings(db, _store(request))
+        watch = db.get(HourlyWatch, watch_scope(values))
+        room = watch.room_json if watch else {}
+        start = local_datetime(room.get("live_start"))
+        next_at = start + timedelta(hours=watch.next_hour) if start and room.get("is_living") else None
+        recent = db.scalars(select(ScreenshotRequest).order_by(ScreenshotRequest.created_at.desc()).limit(10)).all()
+        return {"hourly_enabled": values["hourly_screenshot_enabled"] == "true",
+                "room_id": room.get("live_room_id", ""),
+                "next_hourly_at": next_at.isoformat() if next_at else None,
+                "last_checked_at": local_datetime(watch.checked_at).isoformat() if watch else None,
+                "observation_failed": _dispatcher(request)._hourly_poll_failed,
+                "recent_requests": [{"target": row.target, "planned_at": local_datetime(row.planned_at).isoformat(),
+                    "status": row.status, "delivery_status": row.delivery_json.get("status", "pending"),
+                    "run_id": row.run_id} for row in recent]}
+
+
+@app.post("/api/runs/{run_id}/retry-screenshots")
+async def retry_screenshots(run_id: str, request: Request) -> dict[str, Any]:
+    try:
+        run = await _dispatcher(request).begin_screenshot_delivery(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"run": _run_json(run)}
+
+
 @app.put("/api/settings")
 async def save_settings(payload: SettingsInput, request: Request) -> dict[str, Any]:
     allowed = set(DEFAULT_SETTINGS)
@@ -812,6 +854,19 @@ async def save_settings(payload: SettingsInput, request: Request) -> dict[str, A
     with _db() as db:
         store = _store(request)
         for key, value in payload.values.items():
+            if key in BOOLEAN_SETTINGS and value not in {"true", "false"}:
+                raise HTTPException(status_code=422, detail="功能开关只能是 true 或 false。")
+            if key == "hourly_message_template":
+                from string import Formatter
+
+                try:
+                    allowed_fields = {"hour_index", "shop_name", "live_room_id", "planned_time", "captured_time"}
+                    fields = {name for _, name, _, _ in Formatter().parse(value) if name}
+                    if not fields <= allowed_fields:
+                        raise ValueError("unknown hourly template field")
+                    value.format_map(dict.fromkeys(allowed_fields, 1))
+                except (ValueError, KeyError, IndexError, AttributeError) as exc:
+                    raise HTTPException(status_code=422, detail="每小时截图文案的变量或格式无效。") from exc
             if key in SECRET_KEYS and not value.strip():
                 continue
             if key == "browser_mode" and value not in {"cloak_cdp", "native"}:
@@ -876,13 +931,15 @@ async def check_feishu(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/integrations/feishu/send-test")
-async def send_feishu_test(request: Request) -> dict[str, Any]:
+async def send_feishu_test(request: Request, target: str = "anchor") -> dict[str, Any]:
+    if target not in {"anchor", "hourly"}:
+        raise HTTPException(status_code=422, detail="测试目标只能是主播群或业务每小时群。")
     with _db() as db:
         settings = db_settings(db, _store(request))
     client = FeishuClient(
         settings.get("feishu_app_id", ""),
         settings.get("feishu_app_secret", ""),
-        settings.get("feishu_chat_id", ""),
+        screenshot_chat(settings, target),
     )
     try:
         return {"ok": True, **await client.send_test_message()}

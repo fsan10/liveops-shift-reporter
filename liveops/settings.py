@@ -14,6 +14,23 @@ SECRET_KEYS = {
     "feishu_app_secret",
 }
 
+BOOLEAN_SETTINGS = {
+    "data_collection_enabled": True,
+    "hourly_screenshot_enabled": False,
+    "anchor_screenshot_enabled": True,
+}
+
+
+def setting_enabled(settings: dict[str, str], key: str) -> bool:
+    default = BOOLEAN_SETTINGS[key]
+    return settings.get(key, str(default).lower()).strip().lower() == "true"
+
+
+def screenshot_chat(settings: dict[str, str], target: str) -> str:
+    # The existing Chat ID remains the anchor destination on upgrade.
+    key = "feishu_hourly_chat_id" if target == "hourly" else "feishu_chat_id"
+    return settings.get(key, "").strip()
+
 
 def _masked_secret(value: str) -> str:
     value = value.strip()
@@ -45,6 +62,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "feishu_app_id": "",
     "feishu_app_secret": "",
     "feishu_chat_id": "",
+    "feishu_hourly_chat_id": "",
     "feishu_alert_open_id": "",
     "bitable_app_token": "",
     "bitable_table_id": "",
@@ -80,6 +98,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
         ensure_ascii=False,
     ),
     "report_message_template": "以上主播{host_name}{start_time}-{end_time}点的直播数据",
+    "hourly_message_template": "开播第{hour_index}小时直播截图\n计划时间：{planned_time}\n实际截图时间：{captured_time}",
+    **{key: str(value).lower() for key, value in BOOLEAN_SETTINGS.items()},
     "settle_delay_seconds": "30",
     "auto_catchup_minutes": "90",
 }

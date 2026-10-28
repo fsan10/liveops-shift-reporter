@@ -307,7 +307,7 @@ def test_secret_settings_are_saved_but_not_returned(client):
     assert unknown.status_code == 422
 
 
-def test_manual_run_persists_a_report_and_run_history(client, monkeypatch):
+def test_manual_data_only_run_persists_a_report_and_run_history(client, monkeypatch):
     from datetime import time
 
     from sqlalchemy import select
@@ -318,6 +318,7 @@ def test_manual_run_persists_a_report_and_run_history(client, monkeypatch):
     from liveops.service import now_local
 
     async def fake_collect_report(**kwargs):
+        assert kwargs["screenshots_enabled"] is False
         return {
             "source": {
                 "gmv": 100,
@@ -358,6 +359,9 @@ def test_manual_run_persists_a_report_and_run_history(client, monkeypatch):
             }],
         }
 
+    original_settings = service_module.db_settings
+    monkeypatch.setattr(service_module, "db_settings", lambda *args: {
+        **original_settings(*args), "anchor_screenshot_enabled": "false"})
     monkeypatch.setattr(service_module, "collect_report", fake_collect_report)
     schedule = ShiftSchedule(
         work_date=now_local().date(),
@@ -458,6 +462,7 @@ def test_completed_shift_end_snapshot_becomes_next_shift_baseline(client, monkey
     seen_baselines = []
 
     async def fake_collect_report(**kwargs):
+        assert kwargs["screenshots_enabled"] is False
         seen_baselines.append(kwargs["baseline"])
         sample = len(seen_baselines) - 1
         return {
@@ -494,6 +499,9 @@ def test_completed_shift_end_snapshot_becomes_next_shift_baseline(client, monkey
             "collected_at": "2026-09-29T00:02:30+08:00",
         }
 
+    original_settings = service_module.db_settings
+    monkeypatch.setattr(service_module, "db_settings", lambda *args: {
+        **original_settings(*args), "anchor_screenshot_enabled": "false"})
     monkeypatch.setattr(service_module, "collect_report", fake_collect_report)
     work_date = now_local().date()
     with SessionLocal() as db:

@@ -14,6 +14,10 @@ class FeishuError(RuntimeError):
     pass
 
 
+class FeishuDeliveryUnknown(FeishuError):
+    """The request may have reached the group, but no receipt was returned."""
+
+
 class FeishuClient:
     def __init__(self, app_id: str, app_secret: str, chat_id: str) -> None:
         self.app_id = app_id.strip()
@@ -103,6 +107,8 @@ class FeishuClient:
         )
         if on_progress:
             on_progress("飞书群图文消息已提交。")
+        if not (payload.get("data") or {}).get("message_id"):
+            raise FeishuDeliveryUnknown("飞书未返回截图消息 ID，无法确认送达。")
         return {
             "message_id": (payload.get("data") or {}).get("message_id", ""),
             "image_count": len(image_keys),

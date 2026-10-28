@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
@@ -769,6 +769,10 @@ async def _save_screenshot(
     }
 
 
+class _SkipScreenshotPage(Exception):
+    """An unselected page in a screenshot-only run."""
+
+
 async def _capture_report_pages(
     context: BrowserContext,
     *,
@@ -781,6 +785,7 @@ async def _capture_report_pages(
     screenshots: bool,
     progress: Callable[[str, str, str], None] | None = None,
     on_captured: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
+    collect_data: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     urls = portal_urls(room_id, aavid)
     collector = ResponseCollector()
@@ -833,12 +838,16 @@ async def _capture_report_pages(
     try:
         # Detail page: capture funnel JSON and the requested element screenshot.
         try:
-            note("detail", "进入罗盘直播详情页，读取商品点击漏斗数据。")
+            if not collect_data and "detail_funnel" not in enabled:
+                raise _SkipScreenshotPage
+            note("detail", "进入罗盘直播详情页，读取商品点击漏斗数据。" if collect_data else "等待直播详情页转化漏斗就绪。")
             since = len(collector.responses)
             page = await load("detail", "/shop/live-detail")
             try:
                 await collector.wait_for_data("detail", since=since, timeout=15)
             except RuntimeError as exc:
+                if not collect_data:
+                    raise
                 note("detail", str(exc) + "；将尝试由成交人数和商品点击转化率计算。", "info")
             if screenshots and "detail_funnel" in enabled:
                 try:
@@ -853,13 +862,17 @@ async def _capture_report_pages(
                     note("detail_funnel", f"转化漏斗截图失败：{str(exc)[:300]}", "failed")
             await collector.flush(timeout=12)
             note("detail", "详情页接口已请求。", "succeeded")
+        except _SkipScreenshotPage:
+            pass
         except Exception as exc:
             page_errors.append(f"详情页：{exc}")
             note("detail", f"详情页失败：{str(exc)[:300]}", "failed")
 
         # Professional edition: the shift API is requested after entering 主播分析.
         try:
-            note("pro", "进入罗盘专业版，读取流量分析与主播分析。")
+            if not collect_data and not ({"pro_traffic", "pro_anchor"} & enabled.keys()):
+                raise _SkipScreenshotPage
+            note("pro", "进入罗盘专业版，读取流量分析与主播分析。" if collect_data else "等待专业版截图页面就绪。")
             since = len(collector.responses)
             page = await load("pro", "/screen/live/shop")
             await _wait_screen_data(page, collector, "pro", since=since, reused=reused_pages["pro"])
@@ -880,16 +893,17 @@ async def _capture_report_pages(
                     )
                 )
                 note("pro_traffic", "流量分析截图已保存。", "succeeded")
-            anchor_name = configured.get("pro_anchor", {}).get("section_label") or "主播分析"
-            anchor = await _find_text(page, anchor_name)
-            if await anchor.count() == 0:
-                raise RuntimeError(f"无法定位“{anchor_name}”栏目。")
-            await page.evaluate("window.scrollTo(0, 0)")
-            try:
-                await anchor.click(timeout=2500)
-            except PlaywrightTimeoutError:
-                await anchor.evaluate("element => element.click()")
-            await page.wait_for_timeout(1300)
+            if collect_data or "pro_anchor" in enabled:
+                anchor_name = configured.get("pro_anchor", {}).get("section_label") or "主播分析"
+                anchor = await _find_text(page, anchor_name)
+                if await anchor.count() == 0:
+                    raise RuntimeError(f"无法定位“{anchor_name}”栏目。")
+                await page.evaluate("window.scrollTo(0, 0)")
+                try:
+                    await anchor.click(timeout=2500)
+                except PlaywrightTimeoutError:
+                    await anchor.evaluate("element => element.click()")
+                await page.wait_for_timeout(1300)
             if screenshots and "pro_anchor" in enabled:
                 captured.append(
                     await _save_screenshot(
@@ -897,13 +911,17 @@ async def _capture_report_pages(
                     )
                 )
                 note("pro_anchor", "主播分析截图已保存。", "succeeded")
+        except _SkipScreenshotPage:
+            pass
         except Exception as exc:
             page_errors.append(f"专业版页面：{exc}")
             note("pro", f"专业版页面失败：{str(exc)[:300]}", "failed")
 
         # Basic-screen base_info supplies viewers, followers and watch duration.
         try:
-            note("base", "进入罗盘基础版，读取场观、增粉和停留时长。")
+            if not collect_data and "base_full" not in enabled:
+                raise _SkipScreenshotPage
+            note("base", "进入罗盘基础版，读取场观、增粉和停留时长。" if collect_data else "等待基础版截图页面就绪。")
             since = len(collector.responses)
             page = await load("base", "/screen/shop/main")
             await _wait_screen_data(
@@ -917,12 +935,16 @@ async def _capture_report_pages(
                 )
                 note("base_full", "基础版整页截图已保存。", "succeeded")
             note("base", "基础版接口已请求。", "succeeded")
+        except _SkipScreenshotPage:
+            pass
         except Exception as exc:
             page_errors.append(f"基础版页面：{exc}")
             note("base", f"基础版页面失败：{str(exc)[:300]}", "failed")
 
         # Qianchuan contains structured statQuery JSON and the fifth full-page screenshot.
         try:
+            if not collect_data and "qianchuan_full" not in enabled:
+                raise _SkipScreenshotPage
             note("qianchuan", "进入千川页面，选择全域支付数据并等待指标和卡片加载完成。")
             since = len(collector.responses)
             page = await load("qianchuan", "/board-next")
@@ -955,6 +977,8 @@ async def _capture_report_pages(
                     )
                 )
                 note("qianchuan_full", "千川整页截图已保存。", "succeeded")
+        except _SkipScreenshotPage:
+            pass
         except Exception as exc:
             page_errors.append(f"千川页面：{exc}")
             note("qianchuan", f"千川页面失败：{str(exc)[:300]}", "failed")
@@ -962,14 +986,18 @@ async def _capture_report_pages(
         if on_captured:
             note("screenshots", f"已截取 {len(captured)} 张图，立即启动飞书群发送。")
             await on_captured(list(captured))
-        note("responses", "保存已确认就绪的指标接口响应。")
+        if collect_data:
+            note("responses", "保存已确认就绪的指标接口响应。")
         await collector.flush(timeout=12)
-        note("responses", f"已保存 {len(collector.responses)} 个接口响应。", "succeeded")
+        if collect_data:
+            note("responses", f"已保存 {len(collector.responses)} 个接口响应。", "succeeded")
+        else:
+            note("screenshots", "页面就绪校验完成；临时响应不保存，不采集指标或基线。", "succeeded")
     finally:
         for page in bound_pages:
             if not page.is_closed():
                 collector.unbind(page)
-    return collector.responses, captured, page_errors
+    return collector.responses if collect_data else [], captured, page_errors
 
 
 async def collect_report(
@@ -985,6 +1013,7 @@ async def collect_report(
     interruption_segments: list[dict[str, Any]] | None = None,
     interrupted_at: datetime | None = None,
     on_room_confirmed: Callable[[dict[str, Any]], None] | None = None,
+    screenshots_enabled: bool = True,
 ) -> dict[str, Any]:
     shop = settings.get("shop_name", "")
     room_id = str(schedule.live_room_id or settings.get("live_room_id", "")).strip()
@@ -1027,7 +1056,7 @@ async def collect_report(
             room_responses, images, page_errors = await _capture_report_pages(
                 context, room_id=room_id, aavid=aavid, modules=module_rows,
                 run_id=f"{run_id}/{room_id}", work_date=schedule.work_date,
-                schedule_id=schedule.id, screenshots=True, progress=progress,
+                schedule_id=schedule.id, screenshots=screenshots_enabled, progress=progress,
             )
             captured_at = datetime.now(APP_TIMEZONE)
             room = confirmed_room(room_responses, room)
@@ -1075,7 +1104,8 @@ async def collect_report(
             if segment not in (interruption_segments or []):
                 continue
             responses.extend(segment["responses"])
-            screenshots.extend(segment.get("screenshots", []))
+            if screenshots_enabled:
+                screenshots.extend(segment.get("screenshots", []))
             errors.extend(segment.get("page_errors", []))
     source = combine_handoffs(segments)
     if on_captured:
@@ -1099,6 +1129,111 @@ async def collect_report(
         "is_final": interrupted_at is None and datetime.now(APP_TIMEZONE) >= end_at,
         "measurement_mode": "manual_handoffs",
     }
+
+
+async def _read_room_identity(context: BrowserContext, room: dict[str, Any]) -> dict[str, Any]:
+    """Read only confirmed session metadata; discard all page responses afterwards."""
+    room_id = str(room["live_room_id"])
+    page = next((p for p in context.pages if not p.is_closed()
+                 and urlparse(p.url).path == "/shop/live-detail" and _room_id(p.url) == room_id), None)
+    if page is None:
+        page = await context.new_page()
+    collector = ResponseCollector()
+    collector.bind(page)
+    try:
+        await page.bring_to_front()
+        await _refresh_or_goto(page, portal_urls(room_id, "")["detail"])
+        deadline = asyncio.get_running_loop().time() + PAGE_TIMEOUT_MS / 1000
+        while True:
+            collector.changed.clear()
+            try:
+                if any(item.get("path_full", "").endswith("/liveroom_base_info")
+                       and item.get("live_room_id") and item["live_room_id"] != room_id
+                       for item in collector.responses):
+                    raise RuntimeError("场次身份响应与目标直播间不匹配。")
+                result = confirmed_room(collector.responses, room)
+                if not result.get("author_id"):
+                    raise RuntimeError("直播场次缺少已确认的账号身份。")
+                return result
+            except RuntimeError as exc:
+                if "未获得有效的场次基础信息" not in str(exc):
+                    raise
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise RuntimeError("场次身份接口超时，无法确认开播时间及直播状态。")
+            try:
+                await asyncio.wait_for(collector.changed.wait(), remaining)
+            except TimeoutError:
+                raise RuntimeError("场次身份接口超时，无法确认开播时间及直播状态。") from None
+    finally:
+        collector.unbind(page)
+
+
+async def watch_live_room(settings: dict[str, str], pinned_room_id: str = "") -> dict[str, Any] | None:
+    """Hourly clock discovery, without metrics, formulas, reports or baseline capture."""
+    async with browser_context(settings) as (_, _browser, context):
+        await ensure_shop_login(context, settings)
+        author = settings.get("live_author_id", "")
+        if pinned_room_id:
+            room = {"live_room_id": pinned_room_id, "author_id": author}
+        else:
+            now = datetime.now(APP_TIMEZONE)
+            # Pagination and the date interval also cover overnight sessions.
+            active, history = await _overview_data(context, now - timedelta(days=1), now)
+            if not active:
+                return None
+            target = select_author(active, history, author)
+            matches = [row for row in active if row["author_id"] == target]
+            if not matches:
+                return None
+            if len(matches) != 1:
+                raise RuntimeError("账号有多个正在直播场次，无法启动每小时截图。")
+            room = matches[0]
+        return await _read_room_identity(context, room)
+
+
+async def collect_screenshots(
+    *, settings: dict[str, str], modules: list[Any], run_id: str,
+    room: dict[str, Any] | None = None, schedule: Any = None,
+    pinned_room_id: str = "", interruption_segments: list[dict[str, Any]] | None = None,
+    progress: Callable[[str, str, str], None] | None = None,
+    on_room_confirmed: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Screenshot path deliberately has no snapshot/report/baseline operations."""
+    rows = [module_dict(module) for module in modules]
+    enabled = [row for row in rows if row.get("enabled", True)]
+    if not enabled:
+        raise RuntimeError("未启用任何截图页面，请在采集脚本中选择截图模块。")
+    aavid = str((schedule.qianchuan_account_id if schedule else "")
+                or settings.get("qianchuan_account_id", "")).strip()
+    if any(row["code"] == "qianchuan_full" for row in enabled) and not aavid:
+        raise RuntimeError("千川截图需要配置广告账户 ID。")
+    async with browser_context(settings) as (_, _browser, context):
+        await ensure_shop_login(context, settings)
+        if room is None:
+            selection = await _report_room(
+                context, settings=settings, schedule=schedule,
+                baseline={"live_room_id": pinned_room_id}, saved=interruption_segments or [],
+                start=shift_datetime(schedule.work_date, schedule.start_time),
+                end=schedule_end_datetime(schedule.work_date, schedule.start_time, schedule.end_time),
+                interrupted_at=None,
+            )
+            room = selection["rooms"][0]
+        room = await _read_room_identity(context, room)
+        if schedule is None and not room.get("is_living"):
+            raise RuntimeError("直播已结束，不再执行每小时截图。")
+        if on_room_confirmed:
+            on_room_confirmed({"live_room_id": room["live_room_id"], "author_id": room["author_id"], "rooms": [room]})
+        _, images, errors = await _capture_report_pages(
+            context, room_id=room["live_room_id"], aavid=aavid, modules=rows,
+            run_id=run_id, work_date=datetime.now(APP_TIMEZONE).date(),
+            schedule_id=schedule.id if schedule else "hourly", screenshots=True,
+            collect_data=False, progress=progress,
+        )
+    for item in images:
+        item["live_room_id"] = room["live_room_id"]
+    return {"screenshots": images, "page_errors": errors, "room": room,
+            "collected_at": datetime.now(APP_TIMEZONE).isoformat()}
 
 
 async def collect_baseline(
