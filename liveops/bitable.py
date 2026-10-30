@@ -53,11 +53,53 @@ class BitableClient:
         return _json_response(response)
 
     async def list_fields(self) -> list[dict[str, Any]]:
-        payload = await self._request(
-            "GET",
-            f"/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/fields?page_size=100",
-        )
-        return (payload.get("data") or {}).get("items", [])
+        return await self._list_all("fields")
+
+    async def _list_all(self, resource: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        token = ""
+        seen: set[str] = set()
+        while True:
+            params = {"page_size": 100, **({"page_token": token} if token else {})}
+            payload = await self._request("GET", f"/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/{resource}", params=params)
+            data = payload.get("data") or {}
+            if not isinstance(data.get("items"), list):
+                raise FeishuError("多维表格列表结构不完整，停止修改字段或视图。")
+            rows.extend(data.get("items") or [])
+            if not data.get("has_more"):
+                return rows
+            token = str(data.get("page_token") or "")
+            if not token or token in seen:
+                raise FeishuError("多维表格分页未完整返回，停止同步。")
+            seen.add(token)
+
+    async def ensure_hour_hierarchy(self, parent_field: str, view_id: str = "") -> dict[str, str]:
+        """Native child records are self-links plus a grid view's hierarchy configuration."""
+        if not parent_field.strip():
+            raise FeishuError("请配置小时明细的父记录字段名称。")
+        field = next((row for row in await self.list_fields() if row.get("field_name") == parent_field), None)
+        root = f"/bitable/v1/apps/{self.app_token}/tables/{self.table_id}"
+        if field is None:
+            payload = await self._request("POST", f"{root}/fields", json={"field_name": parent_field,
+                "type": 18, "property": {"table_id": self.table_id, "multiple": False}})
+            field = (payload.get("data") or {}).get("field") or {}
+        if int(field.get("type", 0)) != 18 or (field.get("property") or {}).get("table_id") != self.table_id:
+            raise FeishuError("父记录字段必须是关联当前数据表的单向关联字段；不会覆盖已有字段。")
+        if not field.get("field_id"):
+            raise FeishuError("多维表格未返回父记录字段 ID。")
+        if not view_id:
+            name = "主播时段与小时明细"
+            view = next((row for row in await self._list_all("views") if row.get("view_name") == name
+                         and row.get("view_type") == "grid"), None)
+            if view is None:
+                payload = await self._request("POST", f"{root}/views", json={"view_name": name, "view_type": "grid"})
+                view = (payload.get("data") or {}).get("view") or {}
+            view_id = str(view.get("view_id") or "")
+        if not view_id:
+            raise FeishuError("未取得小时明细层级视图 ID。")
+        await self._request("PATCH", f"{root}/views/{view_id}",
+            json={"property": {"hierarchy_config": {"field_id": field["field_id"]}}})
+        return {"parent_field": parent_field, "field_id": str(field["field_id"]), "view_id": view_id}
 
     async def check_access(self) -> dict[str, Any]:
         fields = await self.list_fields()
@@ -86,6 +128,7 @@ class BitableClient:
         record_id: str = "",
         sync_key_field: str = "",
         sync_key: str = "",
+        lookup_sync_key: bool = False,
     ) -> dict[str, Any]:
         fields_schema = await self.list_fields()
         fields_by_name = {str(row.get("field_name")): row for row in fields_schema}
@@ -109,13 +152,29 @@ class BitableClient:
         if not fields:
             raise FeishuError("多维表格字段映射为空；请核对配置页的列名和实际表头。")
         endpoint = f"/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records"
+        if lookup_sync_key and not record_id:
+            if not sync_key or effective_sync_key_field not in fields_by_name:
+                raise FeishuError("小时明细同步需要可用的 SourceID 幂等键字段。")
+            matches = await self._request("POST", f"{endpoint}/search", json={"filter": {
+                "conjunction": "and", "conditions": [{"field_name": effective_sync_key_field,
+                "operator": "is", "value": [sync_key]}]}})
+            data = matches.get("data") or {}
+            if not isinstance(data.get("items"), list):
+                raise FeishuError("幂等键查询结果不完整，停止新增记录。")
+            rows = data.get("items") or []
+            if len(rows) > 1 or data.get("has_more"):
+                raise FeishuError("多维表格存在重复幂等键，停止创建更多记录。")
+            record_id = str(rows[0].get("record_id") or "") if rows else ""
         if record_id:
             payload = await self._request("PUT", f"{endpoint}/{record_id}", json={"fields": fields})
         else:
             payload = await self._request("POST", endpoint, json={"fields": fields})
         data = payload.get("data") or {}
+        saved_id = str(data.get("record", {}).get("record_id") or record_id)
+        if not saved_id:
+            raise FeishuError("飞书未返回多维表格记录 ID，不能确认写入。")
         return {
-            "record_id": str(data.get("record", {}).get("record_id", record_id)),
+            "record_id": saved_id,
             "created_or_updated": True,
             "missing_mappings": missing_mappings,
             "written_fields": list(fields),
@@ -125,6 +184,10 @@ class BitableClient:
 def _coerce_field(value: Any, field_type: int) -> Any:
     if value is None:
         return None
+    if field_type in {18, 21}:
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise FeishuError("关联字段必须使用记录 ID 数组。")
+        return value
     # Bitable date fields use Unix milliseconds; text date fields remain ISO strings.
     if field_type == 5 and isinstance(value, str):
         try:

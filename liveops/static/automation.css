@@ -10,4 +10,14 @@
 .automation-recent{font-size:12px;color:#66758e;margin:10px 0 16px}
 .automation-recent>div{display:flex;flex-wrap:wrap;justify-content:space-between;gap:5px;padding:7px 0;border-bottom:1px solid var(--line)}
 .sync-status-list+button{margin-top:14px}
+#settings-compatibility[hidden]{display:none}.settings-card .setting-unavailable{opacity:.6}.settings-card .setting-unavailable input{cursor:not-allowed;background:#f1f4f8}
+.hour-toggle{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;background:#eef2ff;color:#3558bd;border:0;border-radius:7px;padding:7px 10px;font-size:12px}
+.hour-chevron{font-size:20px;line-height:16px;transition:transform .2s}.hour-chevron.is-open{transform:rotate(90deg)}
+.hour-drawer-row>td{padding:0!important;border-bottom:0!important}.hour-drawer{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows .24s ease,opacity .2s ease}.hour-drawer.is-open{grid-template-rows:1fr;opacity:1}
+.hour-drawer-clip{overflow:hidden;min-height:0}.hour-drawer-content{padding:18px 22px 22px;background:#f4f7fc;border-left:3px solid #7d96e8}
+.hour-detail-heading{display:flex;flex-wrap:wrap;gap:9px 18px;align-items:center;margin-bottom:14px;color:#283c60;font-size:13px}.hour-detail-heading span{color:#64748c;font-size:12px}.hour-detail-scroll{overflow:auto;max-height:470px}
+.hour-detail-table{background:white}.hour-detail-table thead{position:sticky;top:0;z-index:1}.hour-missing{display:block;margin-top:5px;color:#bd7826;font-size:11px}.shift-summary-row:has(.hour-toggle){cursor:pointer}
+.hour-drawer.is-open .hour-detail-table tbody tr{animation:hour-row-reveal .2s ease both}.hour-detail-table tbody tr:nth-child(2){animation-delay:25ms}.hour-detail-table tbody tr:nth-child(3){animation-delay:50ms}.hour-detail-table tbody tr:nth-child(n+4){animation-delay:75ms}
+@keyframes hour-row-reveal{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+@media(prefers-reduced-motion:reduce){.hour-drawer,.hour-chevron{transition:none}.hour-drawer.is-open .hour-detail-table tbody tr{animation:none}}
 @media(prefers-reduced-motion:reduce){.automation-switch input,.automation-switch input::before{transition:none}}

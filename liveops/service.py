@@ -18,6 +18,7 @@ from liveops.collector import collect_baseline, collect_report
 from liveops.db import SessionLocal
 from liveops.feishu import FeishuClient
 from liveops.formulas import FORMULA_VERSION, build_report_metrics
+from liveops.hourly import ShiftHourlyAutomation
 from liveops.models import (
     CollectionRun,
     CollectorModule,
@@ -197,6 +198,8 @@ def _report_exposure_segments(
     report: ShiftReport, schedule: ShiftSchedule | None
 ) -> list[dict[str, Any]]:
     raw = report.raw_json or {}
+    if raw.get("measurement_mode") == "hourly_parent_pending":
+        return []
     stored = raw.get("segments") or []
     if stored:
         result: list[dict[str, Any]] = []
@@ -338,7 +341,7 @@ def integration_not_configured_status(settings: dict[str, str], integration: str
     return "not_configured: 尚缺 " + "、".join(missing)
 
 
-class RunDispatcher(ScreenshotAutomation):
+class RunDispatcher(ShiftHourlyAutomation, ScreenshotAutomation):
     def __init__(self, settings_store: SettingsStore) -> None:
         self.settings_store = settings_store
         self._browser_lock = asyncio.Lock()
@@ -397,14 +400,29 @@ class RunDispatcher(ScreenshotAutomation):
             result = dict(run.result_json or {}) if run else {}
             targets = list(result.get("screenshot_targets") or [])
             receipts = self._delivery_summary(run_id)
+            from liveops.models import ShiftHourDetail
+
+            hour_rows = db.scalars(select(ShiftHourDetail).where(ShiftHourDetail.latest_run_id == run_id)).all()
+            hour_bad = any(row.missing_fields or row.bitable_status.startswith(("failed", "partial")) for row in hour_rows)
         if not targets:
             await self._notify_single_run_problem(run_id, settings)
             return
         # A successful hourly image delivery must not inherit a shift metric error.
-        if "hourly" in targets and any(row["target"] == "hourly" and row.get("status") == "sent" for row in receipts):
+        if "hourly" in targets and not hour_bad and any(row["target"] == "hourly" and row.get("status") == "sent" for row in receipts):
             targets.remove("hourly")
-        if result.get("data_collection") != "disabled" and run and run.schedule_id and "anchor" not in targets:
+        if result.get("data_collection") not in {"disabled", "hourly_only"} and run and run.schedule_id and "anchor" not in targets:
             targets.append("anchor")
+        if "anchor" in targets and run and run.status != "failed":
+            anchor_issues = [value for value in run.missing_fields if not value.startswith("小时明细:")]
+            if result.get("data_collection") == "hourly_only":
+                anchor_issues = []
+            integrations = result.get("integrations") or {}
+            broken = [value for key, value in integrations.items() if key in {"feishu", "bitable"}
+                      and str(value).startswith(("failed", "partial")) and not str(value).startswith("partial: 小时明细")]
+            if any(row["target"] == "anchor" and row.get("status") in {"failed", "uncertain"} for row in receipts):
+                broken.append("主播截图发送失败")
+            if not anchor_issues and not broken:
+                targets.remove("anchor")
         destinations: set[str] = set()
         for index, target in enumerate(targets):
             chat = screenshot_chat(settings, target)
@@ -566,8 +584,11 @@ class RunDispatcher(ScreenshotAutomation):
                 previous_report = db.scalar(select(ShiftReport).where(ShiftReport.schedule_id == schedule_id))
                 if previous_report and (previous_report.raw_json or {}).get("is_final", True):
                     request_data["data_collection"] = "disabled"
+            if kind == "interruption" and not (setting_enabled(values, "data_collection_enabled")
+                                                or setting_enabled(values, "hourly_screenshot_enabled")):
+                raise RuntimeError("主播汇总和小时明细均已关闭，无法采集中断数据片段。")
             if kind == "interruption" and not setting_enabled(values, "data_collection_enabled"):
-                raise RuntimeError("获取数据已关闭，无法采集并保存中断数据片段。")
+                request_data.update(data_collection="hourly_only", screenshot_targets=["hourly"])
             if kind == "report" and not (setting_enabled(values, "data_collection_enabled")
                                          or setting_enabled(values, "anchor_screenshot_enabled")):
                 raise RuntimeError("获取数据和主播时段截图均已关闭。")
@@ -663,7 +684,7 @@ class RunDispatcher(ScreenshotAutomation):
 
         month_key = now.strftime("%Y-%m")
         if (
-            data_enabled and _integration_ready(values, "bitable")
+            (data_enabled or setting_enabled(values, "hourly_screenshot_enabled")) and _integration_ready(values, "bitable")
             and self._bitable_retention_checked_month != month_key
             and (
                 self._bitable_retention_retry_at is None or now >= self._bitable_retention_retry_at
@@ -725,9 +746,35 @@ class RunDispatcher(ScreenshotAutomation):
             if schedule is None and run_kind != "hourly_screenshot":
                 raise RuntimeError("当前运行任务没有关联排班。")
             screenshot_ids = self._claim_screenshot_requests(run_id, schedule, settings)
+            if run_kind == "shift_hour":
+                if screenshot_ids:
+                    await self._execute_shift_hour(run_id, schedule, settings)
+                else:
+                    with SessionLocal() as db:
+                        current_run = db.get(CollectionRun, run_id)
+                        current_run.status, current_run.message = "skipped", "排班小时采集已关闭。"
+                        current_run.finished_at = utc_now()
+                        db.commit()
+                return
             data_enabled = (setting_enabled(settings, "data_collection_enabled") and run_kind != "hourly_screenshot"
                             and (run.result_json or {}).get("data_collection") != "disabled")
+            if run_kind == "interruption" and setting_enabled(settings, "hourly_screenshot_enabled"):
+                data_enabled = True
             if not data_enabled:
+                with SessionLocal() as db:
+                    request = db.scalar(select(ScreenshotRequest).where(ScreenshotRequest.run_id == run_id,
+                        ScreenshotRequest.target == "hourly", ScreenshotRequest.id.startswith("shift-hour:")))
+                    if request:
+                        from liveops.models import ShiftHourDetail
+
+                        detail = db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id == schedule_id,
+                            ShiftHourDetail.period_index == request.hour_index))
+                        current_run = db.get(CollectionRun, run_id)
+                        current_run.result_json = {**current_run.result_json, "hour_detail_id": detail.id}
+                        db.commit()
+                if request:
+                    await self._execute_shift_hour(run_id, schedule, settings)
+                    return
                 if screenshot_ids:
                     await self._execute_screenshot_only(run_id, schedule, settings)
                 else:
@@ -782,8 +829,9 @@ class RunDispatcher(ScreenshotAutomation):
                     interrupted_at = datetime.fromisoformat(run.result_json["interrupted_at"]) if run_kind == "interruption" else None
                     is_first_schedule = _previous_shift(db, schedule) is None
                     is_final_schedule = _is_last_schedule_for_date(db, schedule)
-                    schedule.baseline_json = baseline
-                    schedule.baseline_at = utc_now()
+                    if setting_enabled(settings, "data_collection_enabled"):
+                        schedule.baseline_json = baseline
+                        schedule.baseline_at = utc_now()
                     db.commit()
                 if is_first_schedule:
                     self._log_step(run_id, "baseline", "当日第一条排班，累计快照从 0 开始。", "succeeded")
@@ -849,6 +897,8 @@ class RunDispatcher(ScreenshotAutomation):
                 missing = list(segment["source"]["baseline_missing"])
                 missing.extend(run_info["page_errors"])
                 missing.extend(segment["source"]["baseline_conflicts"])
+                if not setting_enabled(settings, "data_collection_enabled") and setting_enabled(settings, "hourly_screenshot_enabled"):
+                    missing = [*run_info["page_errors"], *self._hour_interruption_issues(schedule, segment, interrupted_at)]
                 with SessionLocal() as db:
                     event = db.scalar(select(ShiftInterruption).where(
                         ShiftInterruption.schedule_id == schedule_id,
@@ -876,6 +926,7 @@ class RunDispatcher(ScreenshotAutomation):
                     db.commit()
                 self._log_step(run_id, "interruption", current_run.message, current_run.status)
                 return
+            self._save_hourly_capture(schedule, run_id, run_info)
             requires_daily_exposure = is_final_schedule and run_info.get("is_final", True)
             if requires_daily_exposure:
                 with SessionLocal() as db:
@@ -1054,10 +1105,15 @@ class RunDispatcher(ScreenshotAutomation):
                             }}
                     sync_problem = any(str(status).startswith(("failed", "partial"))
                                        for status in current_run.result_json["integrations"].values())
-                    current_run.status = "partial" if missing or sync_problem else "succeeded"
+                    from liveops.models import ShiftHourDetail
+
+                    hour_rows = db.scalars(select(ShiftHourDetail).where(ShiftHourDetail.latest_run_id == run_id)).all()
+                    hour_issues = [f"小时明细:{item}" for row in hour_rows for item in row.missing_fields]
+                    current_run.missing_fields = list(dict.fromkeys([*missing, *hour_issues]))
+                    current_run.status = "partial" if missing or sync_problem or hour_issues else "succeeded"
                     current_run.message = (
                         "采集完成，部分字段、页面或同步异常；详情见运行记录。"
-                        if missing or sync_problem else "采集完成"
+                        if missing or sync_problem or hour_issues else "采集完成"
                     )
                     current_run.finished_at = utc_now()
                     db.commit()
@@ -1077,6 +1133,7 @@ class RunDispatcher(ScreenshotAutomation):
                         }
                     db.commit()
             self._log_step(run_id, "finish", f"采集失败：{str(exc)[:300]}", "failed")
+            self._fail_hour_detail(run_id, str(exc)[:1000])
             with SessionLocal() as db:
                 for request in db.scalars(select(ScreenshotRequest).where(
                     ScreenshotRequest.run_id == run_id, ScreenshotRequest.status == "capturing"
@@ -1296,6 +1353,9 @@ class RunDispatcher(ScreenshotAutomation):
         try:
             for report_id, record_id in records:
                 try:
+                    with SessionLocal() as db:
+                        schedule_id = db.get(ShiftReport, report_id).schedule_id
+                    await self._archive_hour_children(schedule_id, client, settings)
                     await client.delete_record(record_id)
                     archived_ids.append(report_id)
                 except Exception as exc:
@@ -1314,6 +1374,11 @@ class RunDispatcher(ScreenshotAutomation):
                     select(ShiftReport).where(ShiftReport.id.in_(archived_ids))
                 ).all()
                 for row in archived_rows:
+                    from liveops.models import ShiftHourState
+
+                    binding = db.get(ShiftHourState, row.schedule_id)
+                    if binding:
+                        binding.parent_record_id = ""
                     row.bitable_record_id = ""
                     row.bitable_status = "archived: 仅保存在本地数据库"
                     row.synced_at = utc_now()
@@ -1330,6 +1395,7 @@ class RunDispatcher(ScreenshotAutomation):
             await self._sync_integrations_locked(
                 schedule_id, settings, run_id, feishu_task, send_feishu
             )
+        await self._sync_hourly_bitable(schedule_id, settings, run_id)
 
     async def _sync_integrations_locked(
         self, schedule_id: int, settings: dict[str, str], run_id: str,
@@ -1363,6 +1429,9 @@ class RunDispatcher(ScreenshotAutomation):
             report_id = report.id
             record_id = report.bitable_record_id
             report_date = report.work_date
+            from liveops.models import ShiftHourDetail
+
+            has_hours = db.scalar(select(ShiftHourDetail.id).where(ShiftHourDetail.schedule_id == schedule_id).limit(1)) is not None
 
         if feishu_task is None and send_feishu:
             feishu_task = asyncio.create_task(
@@ -1394,6 +1463,7 @@ class RunDispatcher(ScreenshotAutomation):
                         record_id=record_id,
                         sync_key_field=settings.get("bitable_sync_key_field", ""),
                         sync_key=f"shift-{schedule_id}",
+                        lookup_sync_key=has_hours,
                     )
                     new_record_id = result.get("record_id", record_id)
                     bitable_status = "partial" if result.get("missing_mappings") else "synced"

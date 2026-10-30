@@ -67,6 +67,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "bitable_app_token": "",
     "bitable_table_id": "",
     "bitable_sync_key_field": "SourceID",
+    "bitable_parent_field": "父记录",
+    "bitable_hourly_view_id": "",
     "bitable_field_mapping": json.dumps(
         {
             "work_date": "日期",
@@ -98,7 +100,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
         ensure_ascii=False,
     ),
     "report_message_template": "以上主播{host_name}{start_time}-{end_time}点的直播数据",
-    "hourly_message_template": "开播第{hour_index}小时直播截图\n计划时间：{planned_time}\n实际截图时间：{captured_time}",
+    "hourly_message_template": "主播{host_name}第{hour_index}段直播数据 {start_time}-{end_time}\n计划时间：{planned_time}\n实际截图时间：{captured_time}",
     **{key: str(value).lower() for key, value in BOOLEAN_SETTINGS.items()},
     "settle_delay_seconds": "30",
     "auto_catchup_minutes": "90",
@@ -113,6 +115,8 @@ class SettingsStore:
         row = db.get(StoredSetting, key)
         if not row:
             return DEFAULT_SETTINGS.get(key, default or "")
+        if key == "hourly_message_template" and row.value == "开播第{hour_index}小时直播截图\n计划时间：{planned_time}\n实际截图时间：{captured_time}":
+            return DEFAULT_SETTINGS[key]
         return self.secret_box.decrypt(row.value) if row.encrypted else row.value
 
     def is_configured(self, db: Session, key: str) -> bool:

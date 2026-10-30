@@ -2,32 +2,28 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from string import Formatter
 from typing import Any
 
 import httpx
 from sqlalchemy import select
 
-from liveops.collector import collect_screenshots, watch_live_room
+from liveops.collector import collect_screenshots
 from liveops.feishu import FeishuClient, FeishuDeliveryUnknown
 from liveops.models import (
     CollectionRun,
     CollectorModule,
-    HourlyWatch,
     ScreenshotRequest,
     ShiftInterruption,
-    ShiftReport,
 )
-from liveops.portal import schedule_end_datetime, shift_datetime
+from liveops.portal import schedule_end_datetime
 from liveops.sessions import local_datetime
 from liveops.settings import screenshot_chat, setting_enabled
 
 logger = logging.getLogger(__name__)
-HOURLY_GRACE_SECONDS = 300
 METRIC_TEMPLATE_FIELDS = {"gmv", "overall_amount", "overall_roi", "duration_hours"}
 
 
@@ -35,44 +31,20 @@ def end_at(schedule: Any) -> datetime:
     return schedule_end_datetime(schedule.work_date, schedule.start_time, schedule.end_time)
 
 
-def watch_scope(settings: dict[str, str]) -> str:
-    keys = ("browser_mode", "cloak_profile_id", "cloak_profile_name", "native_user_data_dir",
-            "live_author_id", "live_room_id", "qianchuan_account_id")
-    return hashlib.sha256("\0".join(settings.get(key, "") for key in keys).encode()).hexdigest()
 
 
-def hourly_points(room: dict[str, Any], next_hour: int, now: datetime) -> list[tuple[int, datetime]]:
-    start = local_datetime(room.get("live_start"))
-    if start is None or not room.get("is_living"):
-        return []
-    elapsed = max(0, int((now - start).total_seconds() // 3600))
-    return [(index, start + timedelta(hours=index)) for index in range(next_hour, elapsed + 1)]
 
 
-def shareable(request: ScreenshotRequest, schedule: Any, settings: dict[str, str], pinned: str) -> bool:
-    account = str(schedule.qianchuan_account_id or settings.get("qianchuan_account_id", ""))
-    author = settings.get("live_author_id", "")
-    return (local_datetime(request.planned_at) == end_at(schedule)
-            and request.account_id == account
-            and (not pinned or request.room_json.get("live_room_id") == pinned)
-            and (not author or request.room_json.get("author_id") == author))
 
 
-def hourly_deadline(request: ScreenshotRequest, schedules: list[Any], settings: dict[str, str]) -> datetime:
-    delay = 0
-    if setting_enabled(settings, "data_collection_enabled") or setting_enabled(settings, "anchor_screenshot_enabled"):
-        if any(shareable(request, row, settings, row.live_room_id) for row in schedules):
-            delay = max(0, int(settings.get("settle_delay_seconds", "30") or 30))
-    return local_datetime(request.planned_at) + timedelta(seconds=HOURLY_GRACE_SECONDS + delay)
 
 
 class ScreenshotAutomation:
     """Mixin; the dispatcher supplies its database, clock, logging and shared browser lock."""
 
     def _init_screenshots(self) -> None:
-        self._last_hourly_poll: datetime | None = None
-        self._hourly_poll_failed = False
         self._delivery_lock = asyncio.Lock()
+        self._hour_sync_lock = asyncio.Lock()
         self._recovered_screenshot_runs: list[str] = []
 
     def _recover_screenshot_requests(self) -> None:
@@ -119,77 +91,6 @@ class ScreenshotAutomation:
             settings = db_settings(db, self.settings_store)
         await self._notify_run_problem(run_id, settings)
 
-    async def _check_hourly_clock(self, settings: dict[str, str], now: datetime, schedules: list[Any]) -> None:
-        if not setting_enabled(settings, "hourly_screenshot_enabled"):
-            return
-        scope = watch_scope(settings)
-        should_poll = self._last_hourly_poll is None or (now - self._last_hourly_poll).total_seconds() >= 60
-        if should_poll and not self._queued and not self._browser_lock.locked():
-            self._last_hourly_poll = now
-            with self._automation_db() as db:
-                watch = db.get(HourlyWatch, scope)
-                saved_room = dict(watch.room_json) if watch else {}
-                share_with_shift = (setting_enabled(settings, "data_collection_enabled")
-                                    or setting_enabled(settings, "anchor_screenshot_enabled"))
-                current = next((row for row in reversed(schedules)
-                                if shift_datetime(row.work_date, row.start_time) <= now <= end_at(row)), None) if share_with_shift else None
-                pinned = self._schedule_room_id(db, current) if current else settings.get("live_room_id", "")
-                unlocked = False
-                if current:
-                    marked = set(db.scalars(select(ShiftInterruption.live_room_id).where(
-                        ShiftInterruption.schedule_id == current.id)).all())
-                    if pinned in marked:
-                        pinned, unlocked = "", True
-                if not pinned and not unlocked and saved_room.get("is_living"):
-                    pinned = saved_room["live_room_id"]
-            try:
-                async with self._browser_lock:
-                    room = await watch_live_room({**settings, "feishu_chat_id": screenshot_chat(settings, "hourly")}, pinned)
-                now = self._automation_now()
-                with self._automation_db() as db:
-                    watch = db.get(HourlyWatch, scope)
-                    if watch is None:
-                        watch = HourlyWatch(scope=scope, checked_at=now, next_hour=1)
-                        db.add(watch)
-                    old_room = watch.room_json or {}
-                    if (room or {}).get("live_room_id") != old_room.get("live_room_id"):
-                        watch.next_hour = 1
-                    watch.room_json = room or {}
-                    watch.checked_at = now
-                    db.commit()
-                self._hourly_poll_failed = False
-            except Exception as exc:
-                # A terminal discovery failure is audited once until a poll recovers.
-                if not self._hourly_poll_failed:
-                    self._hourly_poll_failed = True
-                    run_id = str(uuid.uuid4())
-                    with self._automation_db() as db:
-                        db.add(CollectionRun(id=run_id, kind="hourly_watch", trigger="scheduler",
-                            status="failed", message=str(exc)[:2000], started_at=datetime.now(timezone.utc),
-                            finished_at=datetime.now(timezone.utc),
-                            result_json={"screenshot_targets": ["hourly"]}))
-                        db.commit()
-                    self._log_step(run_id, "room", "每小时截图无法确认直播状态，已暂停触发。", "failed")
-                    await self._notify_run_problem(run_id, {
-                        **settings, "feishu_chat_id": screenshot_chat(settings, "hourly")})
-                logger.warning("Hourly room observation failed (%s)", type(exc).__name__)
-                return
-        with self._automation_db() as db:
-            watch = db.get(HourlyWatch, scope)
-            if watch is None or self._hourly_poll_failed or (now - local_datetime(watch.checked_at)).total_seconds() > 120:
-                return
-            for index, planned in hourly_points(watch.room_json, watch.next_hour, now):
-                request_id = f"hourly:{scope}:{watch.room_json['live_room_id']}:{index}"
-                if db.get(ScreenshotRequest, request_id) is None:
-                    request = ScreenshotRequest(id=request_id, target="hourly", planned_at=planned,
-                        room_json=dict(watch.room_json), account_id=settings.get("qianchuan_account_id", ""),
-                        hour_index=index)
-                    missed = now > hourly_deadline(request, schedules, settings)
-                    request.status = "missed" if missed else "pending"
-                    request.delivery_json = {"status": "missed", "reason": "错过截图时点，不能补造历史截图。"} if missed else {}
-                    db.add(request)
-                watch.next_hour = index + 1
-            db.commit()
 
     def _anchor_request(self, db: Any, schedule: Any, settings: dict[str, str], run: Any = None) -> ScreenshotRequest:
         early = run is not None and self._automation_now() < end_at(schedule)
@@ -206,15 +107,6 @@ class ScreenshotAutomation:
             request.status, request.screenshots_json, request.delivery_json = "pending", [], {}
         return request
 
-    def _shared_hourly_requests(self, db: Any, schedule: Any, settings: dict[str, str]) -> list[ScreenshotRequest]:
-        if not setting_enabled(settings, "hourly_screenshot_enabled"):
-            return []
-        pinned = self._schedule_room_id(db, schedule)
-        return [row for row in db.scalars(select(ScreenshotRequest).where(
-            ScreenshotRequest.target == "hourly", ScreenshotRequest.status == "pending"
-        )).all() if row.id.startswith(f"hourly:{watch_scope(settings)}:")
-            and shareable(row, schedule, settings, pinned)
-            and self._automation_now() <= hourly_deadline(row, [schedule], settings)]
 
     def _claim_screenshot_requests(self, run_id: str, schedule: Any, settings: dict[str, str]) -> list[str]:
         with self._automation_db() as db:
@@ -245,6 +137,8 @@ class ScreenshotAutomation:
             for request in db.scalars(select(ScreenshotRequest).where(
                 ScreenshotRequest.run_id == run_id, ScreenshotRequest.status == "capturing"
             )).all():
+                if request.target == "hourly" and request.id.startswith("shift-hour:"):
+                    request.room_json = {**request.room_json, "live_room_id": room_id}
                 if request.target == "hourly" and request.room_json.get("live_room_id") != room_id:
                     request.status, request.run_id = "pending", None
                     continue
@@ -268,10 +162,21 @@ class ScreenshotAutomation:
                   "live_room_id": request.room_json.get("live_room_id", ""),
                   "planned_time": local_datetime(request.planned_at).strftime("%Y-%m-%d %H:%M:%S"),
                   "captured_time": local_datetime(captured).strftime("%Y-%m-%d %H:%M:%S")}
+        if request.schedule_id and request.id.startswith("shift-hour:"):
+            from liveops.models import ShiftHourDetail, ShiftSchedule
+
+            with self._automation_db() as db:
+                parent = db.get(ShiftSchedule, request.schedule_id)
+                detail = db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id == request.schedule_id,
+                    ShiftHourDetail.period_index == request.hour_index))
+                if detail and parent:
+                    values.update({**detail.metrics_json, "host_name": parent.host_name, "promoter": parent.promoter,
+                        "start_time": local_datetime(detail.start_at).strftime("%H:%M"),
+                        "end_time": local_datetime(detail.end_at).strftime("%H:%M")})
         try:
-            return settings["hourly_message_template"].format_map(values)
+            return settings["hourly_message_template"].format_map({key: "—" if value is None else value for key, value in values.items()})
         except (KeyError, ValueError, IndexError):
-            return f"开播第{request.hour_index}小时直播截图；计划 {values['planned_time']}；实际 {values['captured_time']}"
+            return f"主播排班第{request.hour_index}段直播数据；计划 {values['planned_time']}；实际 {values['captured_time']}"
 
     def _delivery_summary(self, run_id: str) -> list[dict[str, Any]]:
         with self._automation_db() as db:
@@ -308,6 +213,8 @@ class ScreenshotAutomation:
                 except ValueError:
                     fields = set()
                 if row.target == "anchor" and data_pending and fields & METRIC_TEMPLATE_FIELDS:
+                    continue
+                if row.target == "hourly" and data_pending:
                     continue
                 chat = (screenshot_chat(settings, row.target) if retry else
                         row.delivery_json.get("chat_id") or screenshot_chat(settings, row.target))
@@ -447,69 +354,3 @@ class ScreenshotAutomation:
                                "data_collection": "disabled", "room": result["room"]}
             db.commit()
         self._log_step(run_id, "finish", run.message, run.status)
-
-    async def _reuse_hourly_captures(self, settings: dict[str, str]) -> None:
-        if not setting_enabled(settings, "hourly_screenshot_enabled"):
-            return
-        reused: list[tuple[str, str]] = []
-        with self._automation_db() as db:
-            pending = db.scalars(select(ScreenshotRequest).where(ScreenshotRequest.target == "hourly",
-                ScreenshotRequest.status == "pending")).all()
-            for request in pending:
-                if not request.id.startswith(f"hourly:{watch_scope(settings)}:"):
-                    continue
-                candidates = db.scalars(select(ScreenshotRequest).where(ScreenshotRequest.target == "anchor",
-                    ScreenshotRequest.status == "captured", ScreenshotRequest.planned_at == request.planned_at)).all()
-                reusable = next((row for row in candidates if row.account_id == request.account_id
-                    and any(image.get("live_room_id") == request.room_json.get("live_room_id")
-                            for image in row.screenshots_json)), None)
-                if reusable:
-                    request.status, request.run_id = "captured", reusable.run_id
-                    request.screenshots_json = [image for image in reusable.screenshots_json
-                                               if image.get("live_room_id") == request.room_json["live_room_id"]]
-                    reused.append((reusable.run_id, request.id))
-            db.commit()
-        for source_id, request_id in reused:
-            await self.begin_screenshot_delivery(source_id, "scheduler", [request_id])
-
-    async def _dispatch_hourly_requests(self, settings: dict[str, str], schedules: list[Any], now: datetime) -> None:
-        if not setting_enabled(settings, "hourly_screenshot_enabled") or self._queued or self._browser_lock.locked():
-            return
-        with self._automation_db() as db:
-            pending = db.scalars(select(ScreenshotRequest).where(ScreenshotRequest.target == "hourly",
-                ScreenshotRequest.status == "pending").order_by(ScreenshotRequest.planned_at)).all()
-            for request in pending:
-                if now > hourly_deadline(request, schedules, settings):
-                    request.status = "missed"
-                    request.delivery_json = {"status": "missed", "reason": "错过截图时点，未补造历史截图。"}
-                    continue
-                if not request.id.startswith(f"hourly:{watch_scope(settings)}:"):
-                    request.status = "skipped"
-                    continue
-                overlap = False
-                for row in schedules:
-                    if not shareable(request, row, settings, self._schedule_room_id(db, row)):
-                        continue
-                    report = db.scalar(select(ShiftReport).where(ShiftReport.schedule_id == row.id))
-                    anchor = db.get(ScreenshotRequest, f"anchor:{row.id}")
-                    data_due = setting_enabled(settings, "data_collection_enabled") and (
-                        report is None or (report.raw_json or {}).get("is_final") is False)
-                    anchor_due = setting_enabled(settings, "anchor_screenshot_enabled") and (
-                        anchor is None or anchor.status in {"pending", "capturing", "failed"})
-                    if data_due or anchor_due:
-                        overlap = True
-                        break
-                if overlap:
-                    continue  # The shift task owns the shared capture, including its settle delay.
-                run = CollectionRun(id=str(uuid.uuid4()), kind="hourly_screenshot", trigger="scheduler",
-                    status="queued", result_json={"screenshot_request_ids": [request.id]})
-                db.add(run)
-                db.flush()
-                request.run_id = run.id
-                db.commit()
-                self._queued.add(("hourly_screenshot", 0))
-                task = asyncio.create_task(self._execute(run.id), name=f"liveops-hourly-{run.id}")
-                self._tasks.add(task)
-                task.add_done_callback(self._tasks.discard)
-                return
-            db.commit()

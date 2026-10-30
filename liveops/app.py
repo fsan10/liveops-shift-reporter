@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from liveops.automation import watch_scope
 from liveops.bitable import BitableClient
 from liveops.collector import DEFAULT_MODULES
 from liveops.db import SessionLocal, init_db
@@ -25,9 +24,10 @@ from liveops.formulas import REPORT_COLUMNS
 from liveops.models import (
     CollectionRun,
     CollectorModule,
-    HourlyWatch,
     ScheduleDay,
     ScreenshotRequest,
+    ShiftHourDetail,
+    ShiftHourState,
     ShiftInterruption,
     ShiftReport,
     ShiftSchedule,
@@ -88,6 +88,18 @@ class SettingsInput(BaseModel):
 
 class RunInput(BaseModel):
     schedule_id: int
+
+
+def _clear_uncaptured_hour_plan(db: Session, schedule_id: int) -> None:
+    rows = db.scalars(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id == schedule_id)).all()
+    state = db.get(ShiftHourState, schedule_id)
+    if any(row.latest_run_id for row in rows) or (state and state.initial_baseline_json is not None):
+        raise HTTPException(status_code=409, detail="该排班已有小时采集记录，请停用以保留审计。")
+    for row in rows:
+        db.delete(row)
+    if state:
+        db.delete(state)
+    db.flush()
 
 
 @asynccontextmanager
@@ -259,10 +271,26 @@ def _report_json(row: ShiftReport, include_raw: bool = False) -> dict[str, Any]:
         "bitable_status": row.bitable_status,
         "synced_at": row.synced_at.isoformat() if row.synced_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
+        "summary_final": (row.raw_json or {}).get("is_final", True),
+        "summary_pending": (row.raw_json or {}).get("measurement_mode") == "hourly_parent_pending",
     }
     if include_raw:
         result["raw"] = row.raw_json
     return result
+
+
+def _hour_json(row: ShiftHourDetail) -> dict[str, Any]:
+    from liveops.sessions import local_datetime
+
+    return {"id": row.id, "schedule_id": row.schedule_id, "period_index": row.period_index,
+            "start_at": local_datetime(row.start_at).isoformat(), "end_at": local_datetime(row.end_at).isoformat(),
+            "status": row.status, "metrics": {"duration_hours": (local_datetime(row.end_at)-local_datetime(row.start_at)).total_seconds()/3600,
+                                                **row.metrics_json}, "missing_fields": row.missing_fields,
+            "baseline": row.baseline_json, "end_baseline": (row.raw_json or {}).get("end_baseline"),
+            "captured_at": (row.raw_json or {}).get("captured_at"), "latest_run_id": row.latest_run_id,
+            "bitable_status": row.bitable_status,
+            "screenshots": [{**item, "url": "/artifacts/" + item.get("relative_path", "")}
+                            for item in row.screenshots_json]}
 
 
 def _utc_iso(value: datetime | None) -> str | None:
@@ -533,6 +561,7 @@ async def auto_fill_schedules(payload: AutoScheduleInput, request: Request) -> d
                     detail="该月已有采集记录，不能恢复模板排班；可逐条停用以保留记录。",
                 )
             for row in existing_rows:
+                _clear_uncaptured_hour_plan(db, row.id)
                 db.delete(row)
             for note in db.scalars(
                 select(ScheduleDay).where(
@@ -615,6 +644,10 @@ async def update_schedule(
         _require_editable_schedule_date(schedule.work_date)
         _require_editable_schedule_date(payload.work_date)
         values = _parse_schedule_payload(payload, db_settings(db, store))
+        captured_hour = db.scalar(select(ShiftHourDetail.id).where(ShiftHourDetail.schedule_id == schedule_id,
+            ShiftHourDetail.latest_run_id.is_not(None)).limit(1))
+        if captured_hour and any(values[key] != getattr(schedule, key) for key in ("work_date", "start_time", "end_time")):
+            raise HTTPException(status_code=409, detail="该排班已有小时采集，不能修改日期或时段；请保留原记录。")
         _validate_schedule(db, values, exclude_id=schedule_id)
         for key, value in values.items():
             setattr(schedule, key, value)
@@ -636,6 +669,7 @@ async def delete_schedule(schedule_id: int) -> dict[str, bool]:
             raise HTTPException(
                 status_code=409, detail="该排班已有报告，不能直接删除；请停用排班以保留审计记录。"
             )
+        _clear_uncaptured_hour_plan(db, schedule_id)
         db.delete(schedule)
         db.commit()
         return {"ok": True}
@@ -758,8 +792,11 @@ async def list_reports(
             count_statement = count_statement.where(ShiftReport.work_date == work_date)
         total = db.scalar(count_statement) or 0
         rows = db.scalars(statement.offset((current_page - 1) * per_page).limit(per_page)).all()
+        counts = dict(db.execute(select(ShiftHourDetail.schedule_id, func.count(ShiftHourDetail.id))
+            .where(ShiftHourDetail.schedule_id.in_([row.schedule_id for row in rows]))
+            .group_by(ShiftHourDetail.schedule_id)).all())
         return {
-            "items": [_report_json(row) for row in rows],
+            "items": [{**_report_json(row), "hour_count": counts.get(row.schedule_id, 0)} for row in rows],
             "total": total,
             "page": current_page,
             "page_size": per_page,
@@ -773,6 +810,30 @@ async def get_report(report_id: int) -> dict[str, Any]:
         if row is None:
             raise HTTPException(status_code=404, detail="报表不存在。")
         return {"item": _report_json(row, include_raw=True)}
+
+
+@app.get("/api/reports/{report_id}/hours")
+async def report_hours(report_id: int) -> dict[str, Any]:
+    with _db() as db:
+        parent = db.get(ShiftReport, report_id)
+        if parent is None:
+            raise HTTPException(status_code=404, detail="主播汇总记录不存在。")
+        rows = db.scalars(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id == parent.schedule_id)
+                          .order_by(ShiftHourDetail.period_index)).all()
+        state = db.get(ShiftHourState, parent.schedule_id)
+        return {"items": [_hour_json(row) for row in rows],
+                "initial_baseline": state.initial_baseline_json if state else None,
+                "summary_final": (parent.raw_json or {}).get("is_final", True)}
+
+
+@app.post("/api/reports/{report_id}/sync-hours")
+async def sync_report_hours(report_id: int, request: Request) -> dict[str, Any]:
+    with _db() as db:
+        parent = db.get(ShiftReport, report_id)
+        if parent is None:
+            raise HTTPException(status_code=404, detail="主播汇总记录不存在。")
+        schedule_id = parent.schedule_id
+    return {"run": _run_json(await _dispatcher(request).begin_hourly_sync(schedule_id))}
 
 
 @app.get("/api/runs")
@@ -815,20 +876,24 @@ async def get_settings(request: Request) -> dict[str, Any]:
 
 @app.get("/api/automation/status")
 async def automation_status(request: Request) -> dict[str, Any]:
+    from liveops.hourly import shift_periods
     from liveops.sessions import local_datetime
 
     with _db() as db:
         values = db_settings(db, _store(request))
-        watch = db.get(HourlyWatch, watch_scope(values))
-        room = watch.room_json if watch else {}
-        start = local_datetime(room.get("live_start"))
-        next_at = start + timedelta(hours=watch.next_hour) if start and room.get("is_living") else None
+        now = now_local()
+        schedules = db.scalars(select(ShiftSchedule).where(ShiftSchedule.enabled.is_(True),
+            ShiftSchedule.work_date >= now.date() - timedelta(days=1), ShiftSchedule.work_date <= now.date())).all()
+        upcoming = sorted((right, left, row, index) for row in schedules
+                          for index, (left, right) in enumerate(shift_periods(row), 1) if right > now)
+        next_at, left, schedule, index = upcoming[0] if upcoming else (None, None, None, None)
         recent = db.scalars(select(ScreenshotRequest).order_by(ScreenshotRequest.created_at.desc()).limit(10)).all()
         return {"hourly_enabled": values["hourly_screenshot_enabled"] == "true",
-                "room_id": room.get("live_room_id", ""),
+                "room_id": schedule.live_room_id if schedule else "",
                 "next_hourly_at": next_at.isoformat() if next_at else None,
-                "last_checked_at": local_datetime(watch.checked_at).isoformat() if watch else None,
-                "observation_failed": _dispatcher(request)._hourly_poll_failed,
+                "next_host_name": schedule.host_name if schedule else "",
+                "next_period": f"{left:%H:%M}-{next_at:%H:%M}" if upcoming else "",
+                "clock_source": "roster", "last_checked_at": now.isoformat(), "observation_failed": False,
                 "recent_requests": [{"target": row.target, "planned_at": local_datetime(row.planned_at).isoformat(),
                     "status": row.status, "delivery_status": row.delivery_json.get("status", "pending"),
                     "run_id": row.run_id} for row in recent]}
@@ -860,7 +925,9 @@ async def save_settings(payload: SettingsInput, request: Request) -> dict[str, A
                 from string import Formatter
 
                 try:
-                    allowed_fields = {"hour_index", "shop_name", "live_room_id", "planned_time", "captured_time"}
+                    allowed_fields = {"hour_index", "shop_name", "live_room_id", "planned_time", "captured_time",
+                                      "host_name", "promoter", "start_time", "end_time", "duration_hours",
+                                      "gmv", "overall_amount", "overall_roi"}
                     fields = {name for _, name, _, _ in Formatter().parse(value) if name}
                     if not fields <= allowed_fields:
                         raise ValueError("unknown hourly template field")

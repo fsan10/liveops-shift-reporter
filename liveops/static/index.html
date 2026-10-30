@@ -62,6 +62,7 @@
 
       <section class="view" id="view-settings">
         <div class="page-intro"><div><h2>系统配置</h2><p>凭证加密保存在本机数据库。留空已配置的密钥不会覆盖现有值。</p></div><button class="button button-primary" id="save-settings">保存配置</button></div>
+        <div class="notice notice-amber" id="settings-compatibility" role="status" hidden></div>
         <div class="settings-grid">
           <article class="panel settings-card"><div class="panel-heading"><div><h3>浏览器会话</h3><p>测试环境使用 Cloak Login CDP；正式运行可切换 Playwright 原生浏览器。</p></div></div>
             <label>浏览器模式<select id="browser_mode"><option value="cloak_cdp">Cloak Login（自动连接）</option><option value="native">Playwright 原生浏览器</option></select></label>
@@ -78,23 +79,24 @@
               <label>业务每小时群 Chat ID<input id="feishu_hourly_chat_id" placeholder="单独填写业务群 oc_…"></label>
               <label>登录/滑块负责人 Open ID<input id="feishu_alert_open_id" placeholder="ou_…；提醒时自动 @"></label>
             <label>报告文字模板<textarea id="report_message_template" rows="2"></textarea></label><small class="field-help">可用变量：{host_name}、{promoter}、{date}、{start_time}、{end_time}、{duration_hours}、{gmv}、{overall_amount}、{overall_roi}</small>
-            <label>每小时截图文字模板<textarea id="hourly_message_template" rows="3"></textarea></label><small class="field-help">可用变量：{hour_index}、{shop_name}、{live_room_id}、{planned_time}、{captured_time}</small>
+            <label>小时明细文字模板<textarea id="hourly_message_template" rows="3"></textarea></label><small class="field-help">可用变量：{host_name}、{start_time}、{end_time}、{hour_index}、{duration_hours}、{gmv}、{overall_amount}、{overall_roi}、{planned_time}、{captured_time}</small>
             <div class="button-row"><button class="button button-secondary" id="check-feishu">检查应用凭证</button><button class="button button-secondary" id="test-feishu">测试主播群</button><button class="button button-secondary" id="test-feishu-hourly">测试业务群</button></div>
           </article>
           <article class="panel settings-card"><div class="panel-heading"><div><h3>飞书多维表格</h3><p>多维表格只保留本月热数据；完整历史持续保存在本地数据库。</p></div><span id="bitable-state" class="state-pill">未检查</span></div>
             <label>多维表格 app_token<input id="bitable_app_token"></label><label>数据表 table_id<input id="bitable_table_id"></label><label>幂等键列名<input id="bitable_sync_key_field" placeholder="SourceID"></label>
+            <label>小时明细父记录字段<input id="bitable_parent_field" placeholder="父记录"></label><label>小时明细层级视图 ID（可选）<input id="bitable_hourly_view_id" placeholder="留空自动建立“主播时段与小时明细”视图"></label><small class="field-help">主播汇总为父记录，小时明细为子记录。机器人需有字段、视图与记录编辑权限；SourceID 用于防止重复写入。</small>
             <label>字段映射（JSON）<textarea id="bitable_field_mapping" rows="11" spellcheck="false"></textarea></label>
             <div class="button-row"><button class="button button-secondary" id="check-bitable">检查表格权限</button><button class="button button-secondary" id="load-fields">读取表头</button></div><div id="bitable-fields" class="field-chips"></div>
           </article>
           <article class="panel settings-card"><div class="panel-heading"><div><h3>自动调度</h3><p>按北京时间运行；数据、每小时截图和主播时段截图独立控制。</p></div></div>
             <div class="automation-switches">
-              <label class="automation-switch"><span><strong>获取数据</strong><small>按主播排班结束时间采集指标和基线，保存报表并同步多维表格。</small></span><input id="data_collection_enabled" type="checkbox" role="switch"></label>
-              <label class="automation-switch"><span><strong>每小时截图</strong><small>从实际开播满一小时起截图，发送业务群；不采集指标或基线。</small></span><input id="hourly_screenshot_enabled" type="checkbox" role="switch"></label>
+              <label class="automation-switch"><span><strong>获取主播汇总数据</strong><small>按排班结束时间采集整班数据，维护主播班次基线并同步汇总。</small></span><input id="data_collection_enabled" type="checkbox" role="switch"></label>
+              <label class="automation-switch"><span><strong>每小时截图与明细</strong><small>按主播排班分段，独立保存小时基线和指标，截图发送业务群并同步子记录。</small></span><input id="hourly_screenshot_enabled" type="checkbox" role="switch"></label>
               <label class="automation-switch"><span><strong>主播时段截图</strong><small>按排班结束时间截图并发送主播群；关闭不影响数据采集。</small></span><input id="anchor_screenshot_enabled" type="checkbox" role="switch"></label>
             </div>
             <label>时区<input id="timezone-display" value="Asia/Shanghai" readonly></label><label>结束后等待（秒）<input id="settle_delay_seconds" type="number" min="0" max="3600"></label><label>错过时间后的补采窗口（分钟）<input id="auto_catchup_minutes" type="number" min="0" max="1440"></label>
             <p id="automation-clock" class="field-help" aria-live="polite"></p><div id="automation-recent" class="automation-recent"></div>
-            <div class="notice notice-green"><strong>同一时点共用截图</strong><span>每小时截图与主播排班结束时间重合时，只截一套图，分别发送到已开启的对应群。主播截图沿用结束后等待设置；小时截图错过超过 5 分钟只记录漏拍，不补造历史图片。</span></div>
+            <div class="notice notice-green"><strong>按排班分段，共用末段截图</strong><span>剩余不足 2 小时合并到班次结束，例如 07:00–11:30 分为 07–08、08–09、09–10、10–11:30。末段与主播任务共用一次采集和截图，两套基线分别计算，各自发送对应群。</span></div>
           </article>
         </div>
       </section>
@@ -103,7 +105,8 @@
 
   <dialog id="detail-dialog" class="modal modal-wide"><div class="modal-heading"><div><span class="eyebrow">COLLECTION DETAIL</span><h2 id="detail-title">采集详情</h2></div><button type="button" class="icon-button" data-close-dialog aria-label="关闭">×</button></div><div id="detail-content" class="detail-content"></div></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261009-roster-menu" defer></script>
+  <script src="/static/settings-form.js?v=20261030-settings-compat" defer></script>
+  <script src="/static/app.js?v=20261030-settings-compat" defer></script>
   <script src="/static/widgets.bundle.js" defer></script>
 </body>
 </html>

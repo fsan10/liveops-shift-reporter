@@ -48,7 +48,7 @@ def test_three_switches_and_two_destinations_save_independently(api_client):
 
 @pytest.mark.parametrize("values", [
     {"data_collection_enabled": "1"}, {"hourly_screenshot_enabled": "yes"},
-    {"anchor_screenshot_enabled": ""}, {"hourly_message_template": "{gmv}"},
+    {"anchor_screenshot_enabled": ""}, {"hourly_message_template": "{unsupported_field}"},
     {"hourly_message_template": "{hour_index.__class__}"}, {"hourly_message_template": "{unfinished"},
 ])
 def test_invalid_switches_and_hourly_templates_are_rejected(api_client, values):
@@ -77,3 +77,67 @@ def test_test_messages_use_the_selected_group_and_reject_unknown_targets(api_cli
     assert destinations == ["anchor-destination", "business-destination"]
     assert api_client.post("/api/integrations/feishu/send-test?target=other").status_code == 422
     assert api_client.post("/api/runs/unknown/retry-screenshots").status_code == 404
+
+
+def test_hours_api_exposes_independent_baselines_without_double_counting_parent_rows(api_client):
+    from datetime import datetime, time
+
+    from sqlalchemy import select
+
+    from liveops.models import (
+        CollectionRun,
+        ShiftHourDetail,
+        ShiftHourState,
+        ShiftReport,
+        ShiftSchedule,
+    )
+    from liveops.portal import APP_TIMEZONE
+
+    today = service.now_local().date()
+    with service.SessionLocal() as db:
+        schedule=ShiftSchedule(work_date=today,start_time=time(7),end_time=time(11,30),host_name="测试主播",live_room_id="101")
+        db.add(schedule)
+        db.flush()
+        db.add(CollectionRun(id="hour-api",schedule_id=schedule.id,kind="shift_hour",trigger="scheduler",status="succeeded"))
+        db.flush()
+        parent=ShiftReport(schedule_id=schedule.id,latest_run_id="hour-api",work_date=today,
+            start_time=time(7),end_time=time(11,30),host_name="测试主播",shop_name="测试店",live_room_id="101",
+            raw_json={"is_final":False,"measurement_mode":"hourly_parent_pending"},metrics_json={})
+        db.add(parent)
+        db.add(ShiftHourState(schedule_id=schedule.id,initial_baseline_json={"source":"first_shift_zero"}))
+        db.add(ShiftHourDetail(schedule_id=schedule.id,period_index=4,
+            start_at=datetime.combine(today,time(10),tzinfo=APP_TIMEZONE),
+            end_at=datetime.combine(today,time(11,30),tzinfo=APP_TIMEZONE),latest_run_id="hour-api",status="succeeded",
+            metrics_json={"gmv":450,"duration_hours":1.5},baseline_json={"counters":{"gmv":450}},
+            raw_json={"end_baseline":{"counters":{"gmv":900}}}))
+        db.commit()
+        parent_id,schedule_id=parent.id,schedule.id
+    rows=api_client.get(f"/api/reports?work_date={today.isoformat()}").json()
+    assert rows["total"]==1 and rows["items"][0]["hour_count"]==1
+    assert rows["items"][0]["summary_pending"] and not rows["items"][0]["summary_final"]
+    details=api_client.get(f"/api/reports/{parent_id}/hours").json()
+    assert details["items"][0]["metrics"]["duration_hours"]==1.5
+    assert details["items"][0]["baseline"]["counters"]["gmv"]==450
+    assert details["items"][0]["end_baseline"]["counters"]["gmv"]==900
+    assert api_client.get("/api/reports/9999/hours").status_code==404
+    changed=api_client.put(f"/api/schedules/{schedule_id}",json={"work_date":today.isoformat(),"start_time":"07:00",
+        "end_time":"12:00","host_name":"测试主播","live_room_id":"101"})
+    assert changed.status_code==409
+    with service.SessionLocal() as db:
+        assert db.scalar(select(ShiftSchedule)).end_time==time(11,30)
+
+
+def test_unexecuted_hour_plans_do_not_prevent_schedule_deletion(api_client):
+    from datetime import time
+
+    from liveops.models import ShiftSchedule
+
+    with service.SessionLocal() as db:
+        row=ShiftSchedule(work_date=service.now_local().date(),start_time=time(7),end_time=time(11,30),
+                          host_name="未执行排班",live_room_id="101")
+        db.add(row)
+        db.commit()
+        schedule_id=row.id
+        service.RunDispatcher(None)._ensure_hour_plan(db,row)
+        db.commit()
+    assert api_client.delete(f"/api/schedules/{schedule_id}").status_code==200

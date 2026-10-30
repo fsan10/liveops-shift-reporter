@@ -167,7 +167,7 @@ class ShiftInterruption(Base):
 
 
 class HourlyWatch(Base):
-    """Only room identity and the hourly clock; never metric/baseline snapshots."""
+    """Legacy live-start clocks, retained only for historical audit."""
 
     __tablename__ = "hourly_watches"
 
@@ -175,6 +175,40 @@ class HourlyWatch(Base):
     room_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     next_hour: Mapped[int] = mapped_column(Integer, default=1)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ShiftHourState(Base):
+    """The independent start baseline and remote parent binding for a roster shift."""
+
+    __tablename__ = "shift_hour_states"
+
+    schedule_id: Mapped[int] = mapped_column(ForeignKey("shift_schedules.id"), primary_key=True)
+    initial_baseline_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    bitable_scope: Mapped[str] = mapped_column(String(64), default="")
+    parent_record_id: Mapped[str] = mapped_column(String(100), default="")
+
+
+class ShiftHourDetail(Base):
+    __tablename__ = "shift_hour_details"
+    __table_args__ = (UniqueConstraint("schedule_id", "period_index", name="uq_shift_hour_period"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    schedule_id: Mapped[int] = mapped_column(ForeignKey("shift_schedules.id"), index=True)
+    period_index: Mapped[int] = mapped_column(Integer)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    latest_run_id: Mapped[str | None] = mapped_column(ForeignKey("collection_runs.id"), nullable=True)
+    baseline_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    missing_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
+    screenshots_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    bitable_status: Mapped[str] = mapped_column(Text, default="pending")
+    bitable_record_id: Mapped[str] = mapped_column(String(100), default="")
+    bitable_scope: Mapped[str] = mapped_column(String(64), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+                                               onupdate=lambda: datetime.now(timezone.utc))
 
 
 class ScreenshotRequest(Base):

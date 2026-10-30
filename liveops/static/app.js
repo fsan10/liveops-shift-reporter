@@ -6,6 +6,8 @@ const savedPageSize = key => {
 };
 const state = { view: "overview", date: new Date().toLocaleDateString("en-CA"), schedules: [], reports: [], runs: [], columns: [], settings: {}, secondPrecisionSupported: false, pagination: { reports: { page: 1, pageSize: savedPageSize("reports"), total: 0 }, runs: { page: 1, pageSize: savedPageSize("runs"), total: 0 } }, toastTimer: null, refreshing: false };
 const renderedHtml = new WeakMap();
+const expandedHourReports = new Set(), hourDetailCache = new Map();
+let settingsSchema = null;
 let openDatePicker = null;
 let serviceChipText = "本地服务已运行";
 let rosterChipText = "";
@@ -49,7 +51,7 @@ function missingLabels(items) {
 }
 function stamp(value) { if (!value) return "—"; const iso = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`; return new Date(iso).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }); }
 function dateLabel(value) { return value ? value.replaceAll("-", ".") : ""; }
-function runLabel(run) { return ({ baseline: "千川累计基线", interruption: "中断片段采集", hourly_screenshot: "每小时截图", hourly_watch: "直播状态检查", screenshot_delivery: "截图补发" })[run.kind] || "主播排班任务"; }
+function runLabel(run) { return ({ baseline: "千川累计基线", interruption: "中断片段采集", shift_hour: "主播小时明细", hourly_sync: "小时明细同步", hourly_screenshot: "历史小时截图", hourly_watch: "直播状态检查", screenshot_delivery: "截图补发" })[run.kind] || "主播排班任务"; }
 function renderHTML(node, html) { if (renderedHtml.get(node) === html) return; renderedHtml.set(node, html); node.innerHTML = html; }
 function toast(message, error = false) {
   const node = $("#toast"); node.textContent = message; node.style.background = error ? "#b83f4d" : "#18243a"; node.classList.add("show");
@@ -203,7 +205,36 @@ function reportTable(items) {
   if (!items.length) return empty("当前没有报表数据。到排班管理中先添加主播时段。");
   const columns = state.columns.length ? state.columns : [];
   const visible = columns.length ? columns : Object.keys(items[0].metrics || {}).map(key => ({ key, label: key }));
-  return `<table class="data-table"><thead><tr>${visible.map(col => `<th>${esc(col.label)}</th>`).join("")}<th>截图</th><th>同步状态</th><th>详情</th></tr></thead><tbody>${items.map(row => `<tr>${visible.map(col => { const raw = col.key === "work_date" ? row.work_date : col.key === "time_range" ? row.start_time && row.end_time ? `${row.start_time}-${row.end_time}` : row.metrics?.[col.key] : col.key === "host_name" ? row.host_name : col.key === "promoter" ? row.promoter : row.metrics?.[col.key]; const cell = reportFieldValue(row, col); return `<td class="${(raw == null || raw === "") && col.key !== "daily_exposure" ? "cell-warning" : ""}">${esc(cell)}</td>`; }).join("")}<td>${(row.screenshots || []).length} 张</td><td>${statusLabel(row.feishu_status, "feishu")} ${statusLabel(row.bitable_status, "bitable")}</td><td><button class="small-button" data-report-id="${row.id}">查看</button></td></tr>`).join("")}</tbody></table>`;
+  return `<table class="data-table"><thead><tr><th>小时明细</th>${visible.map(col => `<th>${esc(col.label)}</th>`).join("")}<th>截图</th><th>同步状态</th><th>详情</th></tr></thead><tbody>${items.map(row => {
+    const opened = expandedHourReports.has(row.id), hasHours = row.hour_count > 0;
+    const cells = visible.map(col => `<td>${esc(reportFieldValue(row, col))}</td>`).join("");
+    return `<tr data-hour-row="${row.id}" class="shift-summary-row"><td>${hasHours ? `<button class="hour-toggle" data-hour-toggle="${row.id}" aria-expanded="${opened}" aria-controls="hour-drawer-${row.id}" aria-label="${opened ? "收起" : "展开"}${esc(row.host_name)}小时明细"><span class="hour-chevron ${opened ? "is-open" : ""}">›</span>${row.hour_count} 段</button>` : "—"}</td>${cells}<td>${(row.screenshots || []).length} 张</td><td>${row.summary_pending ? '<span class="pill">主播汇总待结算</span>' : ""}${statusLabel(row.feishu_status, "feishu")} ${statusLabel(row.bitable_status, "bitable")}</td><td><button class="small-button" data-report-id="${row.id}">查看汇总</button></td></tr>${hasHours ? `<tr class="hour-drawer-row"><td colspan="${visible.length + 4}"><div id="hour-drawer-${row.id}" class="hour-drawer ${opened ? "is-open" : ""}" aria-hidden="${!opened}" ${opened ? "" : "inert"}><div class="hour-drawer-clip"><div class="hour-drawer-content">${hourDetailTable(row, visible)}</div></div></div></td></tr>` : ""}`;
+  }).join("")}</tbody></table>`;
+}
+function hourDetailTable(parent, columns) {
+  const rows = hourDetailCache.get(parent.id);
+  if (!rows) return '<p class="panel-note">正在读取小时明细…</p>';
+  const labels = { pending: "待采集", running: "采集中", missed: "漏采", failed: "采集失败", partial: "数据不完整", succeeded: "已采集" };
+  return `<div class="hour-detail-heading"><strong>${esc(parent.host_name)} · 时段小时明细</strong><span>独立累计基线；末段不足 2 小时合并。人数为累计计数净增量，GPM、互动率、停留保留段末卡片口径。</span><button class="small-button" data-hour-sync="${parent.id}">重试同步明细</button></div><div class="hour-detail-scroll"><table class="data-table hour-detail-table"><thead><tr><th>段次 / 状态</th>${columns.map(col => `<th>${esc(col.label)}</th>`).join("")}<th>累计基线 → 结束 GMV</th><th>多维表格</th><th>运行</th></tr></thead><tbody>${rows.map(row => {
+    const time = value => new Date(value).toLocaleTimeString("zh-CN", {timeZone:"Asia/Shanghai",hour:"2-digit",minute:"2-digit",hour12:false});
+    const item = { ...parent, metrics: row.metrics, start_time: time(row.start_at), end_time: time(row.end_at) };
+    const baseline = row.baseline?.source === "first_shift_zero" ? 0 : row.baseline?.counters?.gmv;
+    return `<tr><td>第 ${row.period_index} 段<br><span class="panel-note">${esc(labels[row.status] || row.status)}</span></td>${columns.map(col => `<td>${esc(reportFieldValue(item, col))}</td>`).join("")}<td>${money(baseline)} → ${money(row.end_baseline?.counters?.gmv)}</td><td>${statusLabel(row.bitable_status,"bitable")}</td><td>${row.latest_run_id ? `<button class="small-button" data-run-id="${esc(row.latest_run_id)}">查看</button>` : "—"}${row.missing_fields?.length ? `<span class="hour-missing" title="${esc(row.missing_fields.join('；'))}">存在缺失</span>` : ""}</td></tr>`;
+  }).join("")}</tbody></table></div>`;
+}
+async function toggleHourDetails(id) {
+  if (expandedHourReports.has(id)) expandedHourReports.delete(id); else expandedHourReports.add(id);
+  const drawer = document.getElementById(`hour-drawer-${id}`), open = expandedHourReports.has(id);
+  drawer?.classList.toggle("is-open", open); drawer?.setAttribute("aria-hidden", String(!open));
+  if(drawer) drawer.inert = !open;
+  const button = document.querySelector(`[data-hour-toggle="${id}"]`);
+  button?.setAttribute("aria-expanded", String(open)); button?.querySelector(".hour-chevron")?.classList.toggle("is-open", open);
+  if(button) button.setAttribute("aria-label", button.getAttribute("aria-label").replace(open ? "展开" : "收起", open ? "收起" : "展开"));
+  if (open) {
+    const result = await api(`/api/reports/${id}/hours`); hourDetailCache.set(id, result.items || []);
+    const parent = state.reports.find(row => row.id === id);
+    if (parent && drawer) drawer.querySelector(".hour-drawer-content").innerHTML = hourDetailTable(parent, state.columns);
+  }
 }
 function runsTable(items) {
   if (!items.length) return empty("暂无运行记录。");
@@ -232,6 +263,9 @@ async function loadReportView() {
   state.reports = Number.isFinite(result.total) ? rows : rows.slice((page.page - 1) * page.pageSize, page.page * page.pageSize);
   state.columns = columns.items || [];
   page.total = total;
+  await Promise.all(state.reports.filter(row => expandedHourReports.has(row.id)).map(async row => {
+    const detail = await api(`/api/reports/${row.id}/hours`); hourDetailCache.set(row.id, detail.items || []);
+  }));
   $("#report-count").textContent = `${integer(page.total)} 条记录`;
   renderHTML($("#report-table"), reportTable(state.reports));
   window.dispatchEvent(new CustomEvent("liveops:pagination-updated", { detail: { key: "reports", current: page.page, pageSize: page.pageSize, total: page.total } }));
@@ -381,10 +415,25 @@ async function saveCollector(button) {
   try { await api(`/api/collectors/${encodeURIComponent(button.dataset.moduleSave)}`, { method: "PATCH", body: JSON.stringify(values) }); toast("采集步骤已保存"); await loadCollectors(); }
   catch (error) { showError(error); }
 }
-  const settingKeys = ["browser_mode", "cloak_profile_name", "cloak_profile_id", "native_user_data_dir", "native_chromium_path", "native_context_options", "shop_name", "live_room_id", "live_author_id", "qianchuan_account_id", "feishu_app_id", "feishu_app_secret", "feishu_chat_id", "feishu_hourly_chat_id", "feishu_alert_open_id", "bitable_app_token", "bitable_table_id", "bitable_sync_key_field", "bitable_field_mapping", "report_message_template", "hourly_message_template", "data_collection_enabled", "hourly_screenshot_enabled", "anchor_screenshot_enabled", "settle_delay_seconds", "auto_catchup_minutes"];
+  const settingKeys = ["browser_mode", "cloak_profile_name", "cloak_profile_id", "native_user_data_dir", "native_chromium_path", "native_context_options", "shop_name", "live_room_id", "live_author_id", "qianchuan_account_id", "feishu_app_id", "feishu_app_secret", "feishu_chat_id", "feishu_hourly_chat_id", "feishu_alert_open_id", "bitable_app_token", "bitable_table_id", "bitable_sync_key_field", "bitable_parent_field", "bitable_hourly_view_id", "bitable_field_mapping", "report_message_template", "hourly_message_template", "data_collection_enabled", "hourly_screenshot_enabled", "anchor_screenshot_enabled", "settle_delay_seconds", "auto_catchup_minutes"];
 async function loadSettings() {
-  const { settings } = await api("/api/settings"); state.settings = settings;
-  settingKeys.forEach(key => { const input = document.getElementById(key); if (input && key !== "feishu_app_secret") { if (input.type === "checkbox") input.checked = settings[key] === "true"; else input.value = settings[key] ?? ""; } });
+  const payload = await api("/api/settings"), { settings } = payload; state.settings = settings;
+  settingsSchema = liveopsSettingsForm.contract(payload);
+  const unavailable = [];
+  settingKeys.forEach(key => {
+    const input = document.getElementById(key);
+    if (!input) return;
+    input.disabled = !settingsSchema.supported.has(key);
+    input.closest("label")?.classList.toggle("setting-unavailable", input.disabled);
+    if (input.disabled) unavailable.push(key);
+    if (!settingsSchema.secrets.has(key)) {
+      if (input.type === "checkbox") input.checked = settings[key] === "true";
+      else input.value = settings[key] ?? "";
+    } else input.value = "";
+  });
+  const compatibility = $("#settings-compatibility");
+  compatibility.hidden = unavailable.length === 0;
+  compatibility.textContent = unavailable.length ? "当前后台尚未加载最新版本，排班小时明细和子记录配置需重启后台后生效。暂不可用的配置已置灰；群配置仍可正常修改、保存。" : "";
   $("#feishu_app_secret").placeholder = settings.feishu_app_secret_configured ? settings.feishu_app_secret_masked : "未配置";
   $("#secret-configured").textContent = settings.feishu_app_secret_configured ? `App Secret 已加密保存：${settings.feishu_app_secret_masked}；留空会继续使用已保存的密钥。` : "尚未配置 App Secret。";
   $("#feishu-state").textContent = settings.feishu_app_secret_configured ? "密钥已保存" : "未配置";
@@ -392,14 +441,20 @@ async function loadSettings() {
 }
 async function loadAutomationStatus() {
   const result = await api("/api/automation/status");
-  $("#automation-clock").textContent = !result.hourly_enabled ? "每小时截图已关闭" : result.observation_failed ? "直播状态检查失败，每小时截图已暂停；请查看采集记录。" : result.next_hourly_at ? `下次小时截图：${stamp(result.next_hourly_at)} · 场次 ${result.room_id}` : "等待确认正在直播的场次；开播满一小时后截图。";
+  $("#automation-clock").textContent = !result.hourly_enabled ? "每小时截图已关闭" : result.observation_failed ? "直播状态检查失败，每小时截图已暂停；请查看采集记录。" : result.next_hourly_at ? `下次小时截图：${stamp(result.next_hourly_at)} · ${result.next_host_name || ""} ${result.next_period || ""}` : "等待当天启用的主播排班；按排班时段采集。";
   $("#automation-recent").innerHTML = (result.recent_requests || []).slice(0, 5).map(item => `<div><span>${esc(item.target === "hourly" ? "每小时截图" : "主播时段截图")} · ${esc(stamp(item.planned_at))}</span><span>${esc(({ pending: "等待执行", capturing: "截图中", captured: "已截图", missed: "已漏拍", failed: "截图失败", skipped: "已跳过" })[item.status] || item.status)}${item.status === "captured" ? ` · ${esc(({ sent: "已发送", failed: "发送失败", uncertain: "发送待确认", not_configured: "群未配置", pending: "等待发送", sending: "发送中" })[item.delivery_status] || item.delivery_status)}` : ""}</span></div>`).join("");
 }
 async function saveSettings() {
-  const values = {};
-  settingKeys.forEach(key => { const input = document.getElementById(key); if (input) values[key] = input.type === "checkbox" ? String(input.checked) : input.value; });
+  if (!settingsSchema) { toast("配置尚未加载，请稍后重试", true); return; }
+  const current = {};
+  settingKeys.forEach(key => { const input = document.getElementById(key); if (input && !input.disabled) current[key] = input.type === "checkbox" ? String(input.checked) : input.value; });
+  const { values, unsupported } = liveopsSettingsForm.changedValues(current, state.settings, settingsSchema);
+  if (unsupported.length) { toast("当前后台暂不支持部分修改，请重启后台后保存；已填写内容保留。", true); return; }
+  if (!Object.keys(values).length) { toast("配置未变更"); return; }
+  const button = $("#save-settings"); button.disabled = true;
   try { const result = await api("/api/settings", { method: "PUT", body: JSON.stringify({ values }) }); state.settings = result.settings; toast("配置已加密保存"); await loadSettings(); await loadStatus(); }
   catch (error) { showError(error); }
+  finally { button.disabled = false; }
 }
 async function checkFeishu(send = false, target = "anchor") {
   const button = send ? $(target === "hourly" ? "#test-feishu-hourly" : "#test-feishu") : $("#check-feishu"); button.disabled = true;
@@ -490,6 +545,10 @@ document.addEventListener("click", async event => {
   const nav = event.target.closest("[data-view], [data-nav]");
   if (nav) { setView(nav.dataset.view || nav.dataset.nav); return; }
   const report = event.target.closest("[data-report-id]"); if (report) { showReport(report.dataset.reportId); return; }
+  const hourSync = event.target.closest("[data-hour-sync]"); if(hourSync) { hourSync.disabled = true; try { await api(`/api/reports/${Number(hourSync.dataset.hourSync)}/sync-hours`, {method:"POST"}); toast("已开始同步小时明细，不会重新采集或截图"); } catch(error) { showError(error); } finally {hourSync.disabled = false;} return; }
+  const hourToggle = event.target.closest("[data-hour-toggle]");
+  const hourRow = event.target.closest("[data-hour-row]");
+  if (hourToggle || (hourRow && !event.target.closest("button,a,input,select") && hourRow.querySelector("[data-hour-toggle]"))) { try { await toggleHourDetails(Number(hourToggle?.dataset.hourToggle || hourRow.dataset.hourRow)); } catch(error) { showError(error); } return; }
   const run = event.target.closest("[data-run-id]"); if (run) { showRun(run.dataset.runId); return; }
   const retry = event.target.closest("[data-retry-screenshots]"); if (retry) { retry.disabled = true; try { await api(`/api/runs/${encodeURIComponent(retry.dataset.retryScreenshots)}/retry-screenshots`, { method: "POST" }); toast("已开始补发，已成功的群不会重复发送"); $("#detail-dialog").close(); await refreshAll(); } catch (error) { showError(error); retry.disabled = false; } return; }
   const moduleSave = event.target.closest("[data-module-save]"); if (moduleSave) { saveCollector(moduleSave); return; }

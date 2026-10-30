@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time, timedelta
+import copy
+from datetime import datetime, time
 from types import SimpleNamespace
 
 import httpx
@@ -9,16 +10,25 @@ import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
-import liveops.automation as automation
+import liveops.automation as screenshots
+import liveops.hourly as hourly
 import liveops.service as service
 import liveops.settings as settings_module
 from liveops.db import Base
-from liveops.models import CollectionRun, HourlyWatch, ScreenshotRequest, ShiftReport, ShiftSchedule
+from liveops.models import (
+    CollectionRun,
+    ScreenshotRequest,
+    ShiftHourDetail,
+    ShiftHourState,
+    ShiftReport,
+    ShiftSchedule,
+)
 from liveops.portal import APP_TIMEZONE
 from liveops.settings import DEFAULT_SETTINGS
+from liveops.snapshots import QIAN_KEYS, handoff_source
 
 
-def at(hour=10, minute=30, second=45, day=28):
+def at(hour=8, minute=0, second=31, day=30):
     return datetime(2026, 10, day, hour, minute, second, tzinfo=APP_TIMEZONE)
 
 
@@ -32,20 +42,19 @@ def state(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine, expire_on_commit=False)
-    settings = {**DEFAULT_SETTINGS, "feishu_app_id": "test-app", "feishu_app_secret": "test-secret",
-        "feishu_chat_id": "anchor-chat", "feishu_hourly_chat_id": "hourly-chat",
-        "live_author_id": "author", "qianchuan_account_id": "account", "settle_delay_seconds": "30"}
-    clock = [at()]
-    room = {"live_room_id": "101", "author_id": "author", "live_start": at(8, 30, 0).isoformat(),
-            "is_living": True, "live_end": None}
-    captures, data_calls, sends, watches, alerts = [], [], [], [], []
-    failures = {}
+    settings = {**DEFAULT_SETTINGS, "hourly_screenshot_enabled": "true", "feishu_app_id": "test-app",
+        "feishu_app_secret": "test-secret", "feishu_chat_id": "anchor-chat", "feishu_hourly_chat_id": "hourly-chat",
+        "live_author_id": "author", "qianchuan_account_id": "account"}
+    clock, counter = [at()], [100]
+    captures, calls, sends, alerts, writes, failures = [], [], [], [], [], {}
+    room = {"live_room_id": "101", "author_id": "author", "live_start": at(7, 0, 0).isoformat(),
+            "live_end": None, "is_living": True}
 
     class Bot:
         def __init__(self, app, secret, chat):
             self.chat = chat
 
-        async def send_report(self, caption, images, **kwargs):
+        async def send_report(self, caption, images):
             sends.append((self.chat, caption, images))
             if self.chat in failures:
                 raise failures[self.chat]
@@ -53,144 +62,208 @@ def state(monkeypatch):
 
         async def send_alert(self, *args, **kwargs):
             alerts.append(self.chat)
-            return {"message_id": f"alert-{len(alerts)}"}
+            return {"message_id": "alert"}
 
         async def close(self):
             pass
 
-    def images(room_id):
-        return [{"path": "test.png", "relative_path": "test.png", "name": "测试截图",
-                 "captured_at": clock[0].isoformat(), "live_room_id": room_id}]
+    class Bitable:
+        records = {}
 
-    async def watch(values, pinned):
-        watches.append(pinned)
-        return dict(room) if room else None
+        def __init__(self, *args):
+            pass
 
-    async def screenshots(**kwargs):
-        captures.append(("screenshots", kwargs))
-        assert "baseline" not in kwargs
-        selected = kwargs["room"] or {**room, "live_room_id": kwargs["schedule"].live_room_id or "101"}
-        return {"screenshots": images(selected["live_room_id"]), "room": selected,
-                "page_errors": [], "collected_at": clock[0].isoformat()}
+        async def ensure_hour_hierarchy(self, parent_field, view_id):
+            return {"parent_field": parent_field, "field_id": "field-parent", "view_id": "view-hours"}
 
-    async def report(**kwargs):
-        data_calls.append(kwargs)
-        schedule = kwargs["schedule"]
-        room_id = schedule.live_room_id or "101"
-        result_images = images(room_id) if kwargs["screenshots_enabled"] else []
-        if result_images:
-            captures.append(("report", kwargs))
-        kwargs["on_room_confirmed"]({"live_room_id": room_id})
+        async def upsert_record(self, **kwargs):
+            writes.append(kwargs)
+            key = kwargs["sync_key"]
+            self.records.setdefault(key, f"record-{len(self.records)}")
+            return {"record_id": kwargs.get("record_id") or self.records[key], "missing_mappings": []}
+
+        async def delete_record(self, record_id):
+            pass
+
+        async def close(self):
+            pass
+
+    def images():
+        return [{"live_room_id": "101", "path": "test.png", "relative_path": "test.png",
+                 "name": "测试截图", "captured_at": clock[0].isoformat()}]
+
+    async def collect(**kwargs):
+        calls.append(kwargs)
+        selected = kwargs["schedule"]
+        value = counter[0]
+        snapshot = {"live_room_id": "101", "qianchuan_account_id": "account", "captured_at": clock[0].isoformat(),
+            "counters": {"gmv": value, "paid_users": value/10, "product_click_users": value/5,
+                         "viewers": value, "new_followers": value/100},
+            "qianchuan": {field: value*factor for field, factor in zip(QIAN_KEYS.values(), (0.1, 0.02, 0.2, 100))},
+            "cards": {"gpm": 2000, "interaction_rate": 0.05, "stay_seconds": 60}}
+        source = handoff_source(snapshot=snapshot, room=room, baseline=kwargs["baseline"],
+            start=service.schedule_start(selected), end=service.schedule_end(selected))
+        shots = images() if kwargs["screenshots_enabled"] else []
+        if shots:
+            captures.append(kwargs["run_id"])
+        if kwargs.get("on_room_confirmed"):
+            kwargs["on_room_confirmed"]({"live_room_id": "101"})
         if kwargs.get("on_captured"):
-            await kwargs["on_captured"](result_images)
-        source = {"gmv": 100, "qianchuan_coupon": 5, "paid_users": 1, "product_click_users": 2,
-                  "viewers": 10, "watch_count": 100, "gpm": 1050, "interaction_rate": 1.25,
-                  "new_followers": 1, "stay_seconds": 60, "spend": 10, "exposure": 100}
-        snapshot = {"live_room_id": room_id, "qianchuan_account_id": "account",
-                    "qianchuan": {"stat_cost_for_roi2": 10, "live_show_count_for_roi2": 100},
-                    "counters": {"gmv": 100}}
-        return {"source": source, "responses": [], "screenshots": result_images, "page_errors": [],
-                "schedule_start": service.schedule_start(schedule).isoformat(),
-                "schedule_end": service.schedule_end(schedule).isoformat(), "live_room_id": room_id,
-                "is_final": True, "collected_at": clock[0].isoformat(), "author_id": "author",
-                "segments": [{"room": {**room, "live_room_id": room_id}, "source": {
-                    "segment_end": clock[0].isoformat()}, "snapshot": snapshot, "responses": [],
-                    "qianchuan_account_id": "account", "captured_at": clock[0].isoformat()}]}
+            await kwargs["on_captured"](shots)
+        return {"live_room_id": "101", "shop_name": "测试店", "source": source, "screenshots": shots,
+            "responses": [], "page_errors": [], "collected_at": clock[0].isoformat(), "is_final": True,
+            "schedule_start": service.schedule_start(selected).isoformat(),
+            "schedule_end": service.schedule_end(selected).isoformat(), "author_id": "author",
+            "segments": [{"room": dict(room), "source": source, "snapshot": snapshot, "responses": [],
+                          "qianchuan_account_id": "account", "captured_at": clock[0].isoformat()}]}
+
+    async def capture_only(**kwargs):
+        captures.append(kwargs["run_id"])
+        return {"room": room, "screenshots": images(), "page_errors": [], "collected_at": clock[0].isoformat()}
 
     monkeypatch.setattr(service, "SessionLocal", sessions)
     monkeypatch.setattr(service, "db_settings", lambda *args: dict(settings))
     monkeypatch.setattr(settings_module, "db_settings", lambda *args: dict(settings))
     monkeypatch.setattr(service, "now_local", lambda: clock[0])
-    monkeypatch.setattr(automation, "watch_live_room", watch)
-    monkeypatch.setattr(automation, "collect_screenshots", screenshots)
-    monkeypatch.setattr(service, "collect_report", report)
-    monkeypatch.setattr(automation, "FeishuClient", Bot)
+    monkeypatch.setattr(service, "collect_report", collect)
+    monkeypatch.setattr(screenshots, "collect_screenshots", capture_only)
+    monkeypatch.setattr(screenshots, "FeishuClient", Bot)
     monkeypatch.setattr(service, "FeishuClient", Bot)
-    yield SimpleNamespace(db=sessions, settings=settings, clock=clock, room=room, captures=captures,
-                          data=data_calls, sends=sends, watches=watches, failures=failures, alerts=alerts)
+    monkeypatch.setattr(hourly, "BitableClient", Bitable)
+    monkeypatch.setattr(service, "BitableClient", Bitable)
+    yield SimpleNamespace(db=sessions, settings=settings, clock=clock, counter=counter, captures=captures,
+        calls=calls, sends=sends, alerts=alerts, failures=failures, writes=writes, room=room)
     engine.dispose()
 
 
-def schedules(state, *, room="101", account="account", start=time(8, 30), end=time(10, 30)):
+def add_schedule(state, start=time(7), end=time(11, 30), host="测试主播甲"):
     with state.db() as db:
-        first = ShiftSchedule(work_date=state.clock[0].date(), start_time=start, end_time=end,
-                              host_name="测试主播甲", live_room_id=room, qianchuan_account_id=account)
-        following = ShiftSchedule(work_date=state.clock[0].date(), start_time=end, end_time=time(12, 30),
-                                  host_name="测试主播乙", live_room_id=room, qianchuan_account_id=account)
-        db.add_all([first, following])
+        row = ShiftSchedule(work_date=state.clock[0].date(), start_time=start, end_time=end,
+                            host_name=host, live_room_id="101", qianchuan_account_id="account")
+        db.add(row)
         db.commit()
-        return first.id, following.id
+        return row.id
 
 
-@pytest.mark.parametrize("data,hourly,anchor", [
-    (False, False, False), (False, False, True), (False, True, False), (False, True, True),
-    (True, False, False), (True, False, True), (True, True, False), (True, True, True),
+@pytest.mark.parametrize("start,end,expected", [
+    (time(7), time(11,30), [(7,0,8,0),(8,0,9,0),(9,0,10,0),(10,0,11,30)]),
+    (time(8), time(12), [(8,0,9,0),(9,0,10,0),(10,0,11,0),(11,0,12,0)]),
+    (time(7), time(8,30), [(7,0,8,30)]), (time(7), time(7,30), [(7,0,7,30)]),
+    (time(7), time(9), [(7,0,8,0),(8,0,9,0)]),
+    (time(22,30), time(2), [(22,30,23,30),(23,30,0,30),(0,30,2,0)]),
 ])
-async def test_all_switch_combinations_and_coincident_capture(state, data, hourly, anchor):
-    state.settings.update(data_collection_enabled=str(data).lower(), hourly_screenshot_enabled=str(hourly).lower(),
+def test_roster_period_algorithm(start, end, expected):
+    schedule = SimpleNamespace(work_date=at().date(), start_time=start, end_time=end)
+    plan = hourly.shift_periods(schedule)
+    assert [(left.hour,left.minute,right.hour,right.minute) for left,right in plan] == expected
+    assert all(left < right for left,right in plan)
+    assert all(plan[i][1] == plan[i+1][0] for i in range(len(plan)-1))
+
+
+async def test_hourly_requires_roster_and_ignores_live_start_clock(state):
+    dispatcher = service.RunDispatcher(None)
+    await dispatcher._check_due_schedules()
+    await drain(dispatcher)
+    assert not state.calls and not state.captures
+    add_schedule(state)
+    state.room["live_start"] = at(6,17,0).isoformat()
+    await dispatcher._check_due_schedules()
+    await drain(dispatcher)
+    assert len(state.calls) == 1
+    assert state.calls[0]["schedule"].end_time == time(8)
+
+
+async def collect_shift(state, dispatcher):
+    for when, value in [(at(8),100),(at(9),250),(at(10),450),(at(11,30),900)]:
+        state.clock[0], state.counter[0] = when, value
+        await dispatcher._check_due_schedules()
+        await drain(dispatcher)
+
+
+async def test_two_baseline_chains_and_one_capture_at_shift_end(state):
+    schedule_id = add_schedule(state)
+    dispatcher = service.RunDispatcher(None)
+    await collect_shift(state, dispatcher)
+    assert len(state.calls) == len(state.captures) == 4
+    assert [chat for chat,_,_ in state.sends].count("hourly-chat") == 4
+    assert [chat for chat,_,_ in state.sends].count("anchor-chat") == 1
+    with state.db() as db:
+        summary = db.scalar(select(ShiftReport).where(ShiftReport.schedule_id == schedule_id))
+        rows = db.scalars(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id == schedule_id)
+                          .order_by(ShiftHourDetail.period_index)).all()
+        assert summary.metrics_json["gmv"] == 900
+        assert [row.metrics_json["gmv"] for row in rows] == [100,150,200,450]
+        assert rows[-1].metrics_json["duration_hours"] == 1.5
+        assert rows[-1].metrics_json["hourly_gmv"] == 300
+        assert [row.baseline_json.get("counters", {}).get("gmv",0) for row in rows] == [0,100,250,450]
+        assert [row.raw_json["end_baseline"]["counters"]["gmv"] for row in rows] == [100,250,450,900]
+        assert db.get(ShiftSchedule,schedule_id).baseline_json["source"] == "first_shift_zero"
+        assert db.get(ShiftHourState,schedule_id).initial_baseline_json["source"] == "first_shift_zero"
+        assert rows[-1].latest_run_id == summary.latest_run_id
+        assert summary.raw_json["is_final"]
+    await dispatcher._check_due_schedules()
+    await drain(dispatcher)
+    assert len(state.captures) == 4
+
+
+@pytest.mark.parametrize("data,hour,anchor", [(False,False,False),(False,False,True),
+    (False,True,False),(False,True,True),(True,False,False),(True,False,True),(True,True,False),(True,True,True)])
+async def test_independent_switches_at_final_boundary(state, data, hour, anchor):
+    state.settings.update(data_collection_enabled=str(data).lower(),hourly_screenshot_enabled=str(hour).lower(),
                           anchor_screenshot_enabled=str(anchor).lower())
-    first, following = schedules(state)
+    state.clock[0] = at(11,30)
+    add_schedule(state)
     dispatcher = service.RunDispatcher(None)
     await dispatcher._check_due_schedules()
     await drain(dispatcher)
-    assert len(state.data) == int(data)
-    assert len(state.captures) == int(hourly or anchor)
-    assert sorted(chat for chat, _, _ in state.sends) == sorted(
-        (["anchor-chat"] if anchor else []) + (["hourly-chat"] if hourly else []))
+    assert len(state.calls) == int(data or hour)
+    assert len(state.captures) == int(hour or anchor)
+    assert sorted(chat for chat,_,_ in state.sends) == sorted((["hourly-chat"] if hour else [])+(["anchor-chat"] if anchor else []))
+    assert state.alerts == (["hourly-chat"] if hour else [])
     with state.db() as db:
-        assert db.scalar(select(func.count(ShiftReport.id))) == int(data)
-        next_shift = db.get(ShiftSchedule, following)
-        assert (next_shift.baseline_json is not None) == data
-        if data:
-            assert next_shift.baseline_json["source"] == "previous_shift_end"
-            assert next_shift.baseline_json["counters"]["gmv"] == 100
-        else:
-            assert db.get(ShiftSchedule, first).baseline_json is None
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    assert len(state.captures) == int(hourly or anchor)
-    assert len(state.data) == int(data)
-    if not hourly:
-        assert not state.watches
+        summary = db.scalar(select(ShiftReport))
+        assert bool(summary and summary.raw_json.get("is_final")) == data
+        assert db.scalar(select(func.count(ShiftHourDetail.id)).where(ShiftHourDetail.latest_run_id.is_not(None))) == int(hour)
 
 
-async def test_hourly_works_without_roster_and_starts_after_one_elapsed_hour(state):
-    state.settings.update(data_collection_enabled="false", anchor_screenshot_enabled="false", hourly_screenshot_enabled="true")
-    state.room["live_start"] = at(8, 35, 0).isoformat()
-    state.clock[0] = at(9, 34, 30)
+async def test_hour_details_never_supply_anchor_baseline_and_next_host_hours_are_independent(state):
+    first = add_schedule(state)
+    second = add_schedule(state, time(11,30),time(14),"测试主播乙")
     dispatcher = service.RunDispatcher(None)
+    await collect_shift(state, dispatcher)
+    state.clock[0],state.counter[0] = at(12,30),1200
     await dispatcher._check_due_schedules()
     await drain(dispatcher)
-    assert not state.captures
-    state.clock[0] = at(9, 35, 45)
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    assert len(state.captures) == 1 and not state.data
-    assert state.sends[0][0] == "hourly-chat" and "第1小时" in state.sends[0][1]
     with state.db() as db:
-        run = db.scalar(select(CollectionRun).where(CollectionRun.kind == "hourly_screenshot"))
-        assert run.schedule_id is None and "metrics" not in run.result_json
-        assert "source" not in run.result_json and "baseline" not in run.result_json
+        row = db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id==second,
+            ShiftHourDetail.period_index==1))
+        assert row.baseline_json["counters"]["gmv"] == 900
+        assert row.metrics_json["gmv"] == 300
+        assert db.get(ShiftSchedule,second).baseline_json["counters"]["gmv"] == 900
+        assert db.get(ShiftHourState,first).initial_baseline_json["source"] == "first_shift_zero"
 
 
-@pytest.mark.parametrize("different", ["room", "account"])
-async def test_different_room_or_account_cannot_share_images(state, different):
-    state.settings.update(hourly_screenshot_enabled="true")
-    schedules(state, room="202" if different == "room" else "101",
-              account="other-account" if different == "account" else "account")
+async def test_missed_hour_is_missing_and_does_not_become_zero_or_merge_into_the_next_hour(state):
+    schedule_id = add_schedule(state)
     dispatcher = service.RunDispatcher(None)
+    state.clock[0],state.counter[0] = at(9),250
     await dispatcher._check_due_schedules()
     await drain(dispatcher)
+    with state.db() as db:
+        rows = db.scalars(select(ShiftHourDetail).order_by(ShiftHourDetail.period_index)).all()
+        assert rows[0].status == "missed"
+        assert rows[1].status == "partial" and rows[1].metrics_json["gmv"] is None
+    state.clock[0],state.counter[0] = at(10),450
     await dispatcher._check_due_schedules()
     await drain(dispatcher)
-    assert len(state.captures) == 2
-    assert sorted(chat for chat, _, _ in state.sends) == ["anchor-chat", "hourly-chat"]
-    hourly_images = next(images for chat, _, images in state.sends if chat == "hourly-chat")
-    assert hourly_images[0]["live_room_id"] == "101"
+    with state.db() as db:
+        row = db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id==schedule_id,
+            ShiftHourDetail.period_index==3))
+        assert row.metrics_json["gmv"] == 200
 
 
-async def test_restarts_keep_hourly_receipts_and_do_not_replay_missed_hours(state):
-    state.settings.update(data_collection_enabled="false", anchor_screenshot_enabled="false", hourly_screenshot_enabled="true")
+async def test_restart_does_not_recapture_completed_hour(state):
+    add_schedule(state)
     first = service.RunDispatcher(None)
     await first._check_due_schedules()
     await drain(first)
@@ -198,234 +271,196 @@ async def test_restarts_keep_hourly_receipts_and_do_not_replay_missed_hours(stat
     second._recover_screenshot_requests()
     await second._check_due_schedules()
     await drain(second)
-    assert len(state.captures) == len(state.sends) == 1
+    assert len(state.calls) == len(state.captures) == len(state.sends) == 1
+
+
+async def test_late_hour_request_reuses_existing_final_capture_and_keeps_summary_metrics(state):
+    state.settings["hourly_screenshot_enabled"]="false"
+    schedule_id=add_schedule(state)
+    state.clock[0],state.counter[0]=at(11,30),900
+    dispatcher=service.RunDispatcher(None)
+    await dispatcher._check_due_schedules()
+    await drain(dispatcher)
+    assert len(state.calls)==1 and [chat for chat,_,_ in state.sends]==["anchor-chat"]
+    state.settings["hourly_screenshot_enabled"]="true"
+    await dispatcher._check_due_schedules()
+    await drain(dispatcher)
+    assert len(state.calls)==len(state.captures)==1
+    assert [chat for chat,_,_ in state.sends]==["anchor-chat","hourly-chat"]
     with state.db() as db:
-        rows = db.scalars(select(ScreenshotRequest).order_by(ScreenshotRequest.hour_index)).all()
-        assert [row.status for row in rows] == ["missed", "captured"]
-        assert db.scalar(select(HourlyWatch)).next_hour == 3
+        parent=db.scalar(select(ShiftReport).where(ShiftReport.schedule_id==schedule_id))
+        assert parent.metrics_json["gmv"]==900 and parent.raw_json["is_final"]
 
 
-async def test_old_pending_hourly_request_is_not_claimed_by_a_late_data_catchup(state):
-    state.settings.update(anchor_screenshot_enabled="false", hourly_screenshot_enabled="true")
-    schedules(state)
-    scope = automation.watch_scope(state.settings)
-    with state.db() as db:
-        db.add(HourlyWatch(scope=scope, room_json=state.room, next_hour=3, checked_at=state.clock[0]))
-        db.add(ScreenshotRequest(id=f"hourly:{scope}:101:2", target="hourly", planned_at=at(10, 30, 0),
-            room_json=state.room, account_id="account", hour_index=2, status="pending"))
-        db.commit()
-    state.clock[0] = at(11, 0, 0)
-    dispatcher = service.RunDispatcher(None)
-    for _ in range(2):
-        await dispatcher._check_due_schedules()
-        await drain(dispatcher)
-    assert len(state.data) == 1 and not state.captures and not state.sends
-    with state.db() as db:
-        assert db.get(ScreenshotRequest, f"hourly:{scope}:101:2").status == "missed"
+def test_pending_hour_parent_is_neither_an_anchor_handoff_nor_a_daily_exposure_source():
+    parent=SimpleNamespace(raw_json={"is_final":False,"measurement_mode":"hourly_parent_pending"})
+    assert service._baseline_from_report(parent) is None
+    assert service._report_exposure_segments(parent,None)==[]
 
 
-def test_hourly_points_cross_midnight_without_resetting():
-    start = at(23, 35, 0, day=27)
-    room = {"is_living": True, "live_start": start.isoformat()}
-    points = automation.hourly_points(room, 1, at(1, 36, 0))
-    assert points == [(1, at(0, 35, 0)), (2, at(1, 35, 0))]
-    room["is_living"] = False
-    assert automation.hourly_points(room, 3, at(4)) == []
-
-
-async def test_late_hourly_discovery_reuses_saved_anchor_capture(state):
-    state.settings.update(data_collection_enabled="false", hourly_screenshot_enabled="false")
-    schedules(state)
-    dispatcher = service.RunDispatcher(None)
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    assert len(state.captures) == 1
-    state.settings["hourly_screenshot_enabled"] = "true"
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    assert len(state.captures) == 1
-    assert [chat for chat, _, _ in state.sends] == ["anchor-chat", "hourly-chat"]
-    assert state.sends[0][2] == state.sends[1][2]
-
-
-async def test_late_hourly_discovery_after_restart_also_reuses_saved_capture(state):
-    state.settings.update(data_collection_enabled="false", hourly_screenshot_enabled="false")
-    schedules(state)
-    first = service.RunDispatcher(None)
-    await first._check_due_schedules()
-    await drain(first)
-    state.settings["hourly_screenshot_enabled"] = "true"
-    restarted = service.RunDispatcher(None)
-    restarted._recover_screenshot_requests()
-    await restarted._check_due_schedules()
-    await drain(restarted)
-    assert len(state.captures) == 1 and len(state.sends) == 2
-
-
-async def test_shared_capture_respects_long_shift_settle_delay(state):
-    state.settings.update(hourly_screenshot_enabled="true", settle_delay_seconds="600")
-    schedules(state)
-    state.clock[0] = at(10, 35, 0)
-    dispatcher = service.RunDispatcher(None)
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    assert not state.captures
-    state.clock[0] = at(10, 40, 45)
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    assert len(state.captures) == len(state.data) == 1
-    assert sorted(chat for chat, _, _ in state.sends) == ["anchor-chat", "hourly-chat"]
-
-
-async def test_different_planned_times_capture_separately_and_route_correctly(state):
-    state.settings["hourly_screenshot_enabled"] = "true"
-    state.room["live_start"] = at(8, 35, 0).isoformat()
-    schedules(state)
-    dispatcher = service.RunDispatcher(None)
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    assert [chat for chat, _, _ in state.sends] == ["anchor-chat"]
-    state.clock[0] = at(10, 35, 45)
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    assert len(state.data) == 1 and len(state.captures) == 2
-    assert [chat for chat, _, _ in state.sends] == ["anchor-chat", "hourly-chat"]
-
-
-async def test_one_group_failure_retries_only_that_group_without_new_capture(state):
-    state.settings.update(hourly_screenshot_enabled="true")
-    schedules(state)
+async def test_each_group_retries_independently_without_resampling(state):
+    add_schedule(state)
     state.failures["hourly-chat"] = RuntimeError("permission denied")
+    state.clock[0] = at(11,30)
     dispatcher = service.RunDispatcher(None)
     await dispatcher._check_due_schedules()
     await drain(dispatcher)
-    assert [chat for chat, _, _ in state.sends].count("hourly-chat") == 1
     with state.db() as db:
-        original = db.scalar(select(CollectionRun).where(CollectionRun.kind == "report"))
-        assert original.status == "partial"
-        original_id = original.id
+        source = db.scalar(select(CollectionRun).where(CollectionRun.kind=="report"))
+        source_id = source.id
     state.failures.clear()
-    await dispatcher.begin_screenshot_delivery(original_id)
-    await drain(dispatcher)
-    assert [chat for chat, _, _ in state.sends].count("anchor-chat") == 1
-    assert [chat for chat, _, _ in state.sends].count("hourly-chat") == 2
-    assert len(state.captures) == 1 and len(state.data) == 1
-
-
-async def test_missing_hourly_group_never_falls_back_to_anchor_group(state):
-    state.settings.update(data_collection_enabled="false", anchor_screenshot_enabled="false",
-                          hourly_screenshot_enabled="true", feishu_hourly_chat_id="")
-    dispatcher = service.RunDispatcher(None)
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    assert len(state.captures) == 1 and not state.sends
-    with state.db() as db:
-        request = db.scalar(select(ScreenshotRequest).where(ScreenshotRequest.status == "captured"))
-        assert request.delivery_json["status"] == "not_configured" and request.delivery_json["chat_id"] == ""
-
-
-async def test_failed_group_retry_uses_corrected_configuration_for_that_same_purpose(state):
-    state.settings.update(data_collection_enabled="false", hourly_screenshot_enabled="true")
-    schedules(state)
-    state.failures["hourly-chat"] = RuntimeError("invalid chat")
-    dispatcher = service.RunDispatcher(None)
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    with state.db() as db:
-        source_id = db.scalar(select(ScreenshotRequest).where(ScreenshotRequest.target == "hourly",
-            ScreenshotRequest.status == "captured")).run_id
-    state.settings["feishu_hourly_chat_id"] = "corrected-hourly-chat"
     await dispatcher.begin_screenshot_delivery(source_id)
     await drain(dispatcher)
-    assert sorted(chat for chat, _, _ in state.sends[:2]) == ["anchor-chat", "hourly-chat"]
-    assert state.sends[-1][0] == "corrected-hourly-chat"
-    assert len(state.captures) == 1
+    assert [chat for chat,_,_ in state.sends].count("anchor-chat") == 1
+    assert [chat for chat,_,_ in state.sends].count("hourly-chat") == 2
+    assert len(state.captures) == len(state.calls) == 1
 
 
-async def test_transport_timeout_is_uncertain_and_never_automatically_resent(state):
-    state.settings.update(data_collection_enabled="false", anchor_screenshot_enabled="false", hourly_screenshot_enabled="true")
+async def test_uncertain_delivery_is_not_automatically_resent(state):
+    add_schedule(state)
     state.failures["hourly-chat"] = httpx.ReadTimeout("response lost")
     dispatcher = service.RunDispatcher(None)
     await dispatcher._check_due_schedules()
     await drain(dispatcher)
     with state.db() as db:
-        request = db.scalar(select(ScreenshotRequest).where(ScreenshotRequest.status == "captured"))
+        request = db.scalar(select(ScreenshotRequest).where(ScreenshotRequest.status=="captured"))
         assert request.delivery_json["status"] == "uncertain"
-        run_id = request.run_id
-    with pytest.raises(RuntimeError, match="核实"):
-        await dispatcher.begin_screenshot_delivery(run_id)
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    assert len(state.sends) == 1
+        source = request.run_id
+    with pytest.raises(RuntimeError,match="核实"):
+        await dispatcher.begin_screenshot_delivery(source)
+    assert len(state.sends)==1
 
 
-async def test_hourly_metrics_are_never_requested_and_stopped_room_produces_no_capture(state):
-    state.settings.update(data_collection_enabled="true", anchor_screenshot_enabled="true", hourly_screenshot_enabled="true")
-    state.room.update(is_living=False, live_end=at(9).isoformat())
+async def test_native_bitable_children_keep_one_parent_and_stable_child_keys(state):
+    state.settings.update(bitable_app_token="test-base",bitable_table_id="test-table")
+    schedule_id = add_schedule(state)
     dispatcher = service.RunDispatcher(None)
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    assert not state.data and not state.captures and not state.sends
-
-
-async def test_hourly_only_does_not_depend_on_roster_room_or_baseline(state):
-    state.settings.update(data_collection_enabled="false", anchor_screenshot_enabled="false", hourly_screenshot_enabled="true")
-    first, _ = schedules(state, room="old-roster-room")
+    await collect_shift(state,dispatcher)
     with state.db() as db:
-        row = db.get(ShiftSchedule, first)
-        row.baseline_json = {"live_room_id": "old-baseline-room"}
-        db.commit()
-    dispatcher = service.RunDispatcher(None)
-    await dispatcher._check_due_schedules()
-    await drain(dispatcher)
-    assert state.watches == [""] and len(state.captures) == 1 and not state.data
-    assert state.sends[0][2][0]["live_room_id"] == "101"
+        rows = db.scalars(select(ShiftHourDetail).order_by(ShiftHourDetail.period_index)).all()
+        parent = db.scalar(select(ShiftReport))
+        assert all(row.bitable_status=="synced" for row in rows)
+        parent_id = parent.bitable_record_id
+        ids = [row.bitable_record_id for row in rows]
+        source = parent.latest_run_id
+    await dispatcher._sync_hourly_bitable(schedule_id,state.settings,source)
     with state.db() as db:
-        row = db.get(ShiftSchedule, first)
-        assert row.live_room_id == "old-roster-room"
-        assert row.baseline_json == {"live_room_id": "old-baseline-room"}
+        assert [row.bitable_record_id for row in db.scalars(select(ShiftHourDetail).order_by(ShiftHourDetail.period_index))]==ids
+    child_writes = [row for row in state.writes if "parent_record" in row["values"]]
+    assert all(row["values"]["parent_record"]==[parent_id] for row in child_writes)
+    assert len({row["sync_key"] for row in child_writes})==4
 
 
-async def test_hourly_discovery_failure_is_audited_once_until_recovery(state, monkeypatch):
-    state.settings.update(data_collection_enabled="false", anchor_screenshot_enabled="false", hourly_screenshot_enabled="true")
-
-    async def unavailable(*args):
-        raise RuntimeError("罗盘登录/场次接口未就绪")
-
-    monkeypatch.setattr(automation, "watch_live_room", unavailable)
+async def test_hour_recapture_recomputes_following_hour_without_mutating_summary_baseline(state):
+    schedule_id = add_schedule(state)
     dispatcher = service.RunDispatcher(None)
-    for _ in range(2):
+    await collect_shift(state,dispatcher)
+    with state.db() as db:
+        first = db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.period_index==1))
+        summary = db.scalar(select(ShiftReport))
+        schedule = db.get(ShiftSchedule,schedule_id)
+        capture = {**copy.deepcopy(first.raw_json),"live_room_id":"101","screenshots":first.screenshots_json,
+            "collected_at":first.raw_json["captured_at"]}
+        capture["segments"][0]["snapshot"]["counters"]["gmv"]=120
+        source = first.latest_run_id
+        original_summary = copy.deepcopy(summary.metrics_json)
+    dispatcher._save_hourly_capture(schedule,source,capture,first.id)
+    with state.db() as db:
+        second = db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.period_index==2))
+        assert second.baseline_json["counters"]["gmv"]==120
+        assert second.metrics_json["gmv"]==130
+        assert db.scalar(select(ShiftReport)).metrics_json==original_summary
+
+
+async def test_overnight_hour_rows_keep_parent_business_date_and_last_merged_period(state):
+    schedule_id=add_schedule(state,time(22,30),time(2))
+    dispatcher=service.RunDispatcher(None)
+    for when,value in [(at(23,30),100),(at(0,30,day=31),250),(at(2,day=31),900)]:
+        state.clock[0],state.counter[0]=when,value
         await dispatcher._check_due_schedules()
-        state.clock[0] += timedelta(minutes=1)
-    assert state.alerts == ["hourly-chat"] and not state.captures and not state.data
+        await drain(dispatcher)
     with state.db() as db:
-        run = db.scalar(select(CollectionRun))
-        assert run.kind == "hourly_watch" and run.status == "failed"
-        assert run.result_json["exception_alert"]["status"] == "sent"
+        rows=db.scalars(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id==schedule_id)
+                        .order_by(ShiftHourDetail.period_index)).all()
+        assert [row.metrics_json["gmv"] for row in rows]==[100,150,650]
+        assert rows[-1].metrics_json["duration_hours"]==1.5
+        assert all(row.metrics_json["work_date"]=="2026-10-30" for row in rows)
+        assert db.scalar(select(ShiftReport)).work_date==at().date()
 
 
-async def test_metric_failure_does_not_notify_successful_hourly_group(state, monkeypatch):
-    state.settings.update(hourly_screenshot_enabled="true")
-    schedules(state)
-    monkeypatch.setattr(service, "build_report_metrics", lambda **kwargs: ({}, ["GMV"]))
-    dispatcher = service.RunDispatcher(None)
+async def test_interrupted_hour_merges_saved_fragment_but_hands_only_new_room_end_to_next_hour(state):
+    schedule_id=add_schedule(state)
+    dispatcher=service.RunDispatcher(None)
     await dispatcher._check_due_schedules()
     await drain(dispatcher)
-    assert sorted(chat for chat, _, _ in state.sends) == ["anchor-chat", "hourly-chat"]
-    assert state.alerts == ["anchor-chat"]
-
-
-async def test_recovery_does_not_resend_a_group_with_a_persisted_sending_state(state):
     with state.db() as db:
-        db.add(CollectionRun(id="stopped", kind="hourly_screenshot", trigger="scheduler", status="running"))
+        first=db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.period_index==1))
+        second=db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.period_index==2))
+        schedule=db.get(ShiftSchedule,schedule_id)
+        baseline=copy.deepcopy(first.raw_json["end_baseline"])
+        old=copy.deepcopy(first.raw_json["segments"][0])
+    old["room"]["live_end"]=at(8,30,0).isoformat()
+    old["source"]["segment_end"]=at(8,30,0).isoformat()
+    old["snapshot"]["counters"]["gmv"]=300
+    old["captured_at"]=at(8,30).isoformat()
+    new=copy.deepcopy(old)
+    new["room"].update(live_room_id="202",live_start=at(8,30,0).isoformat(),live_end=None)
+    new["snapshot"]["live_room_id"]="202"
+    new["snapshot"]["counters"]["gmv"]=50
+    new["captured_at"]=at(9).isoformat()
+    new["source"]["segment_end"]=at(9,0,0).isoformat()
+    capture={"segments":[old,new],"collected_at":at(9).isoformat()}
+    metrics,raw,missing=hourly.detail_values(capture,baseline,second,schedule)
+    assert metrics["gmv"]==250
+    next_baseline=hourly.end_baseline(capture,"new-room-run")
+    assert next_baseline["live_room_id"]=="202" and next_baseline["counters"]["gmv"]==50
+    assert raw["source"]["segment_count"]==2
+
+
+async def test_restart_releases_incomplete_hour_state_without_resending_uncertain_receipts(state):
+    schedule_id=add_schedule(state)
+    first=service.RunDispatcher(None)
+    with state.db() as db:
+        schedule=db.get(ShiftSchedule,schedule_id)
+        detail=first._ensure_hour_plan(db,schedule)[0]
+        run=CollectionRun(id="interrupted-hour",kind="shift_hour",schedule_id=schedule_id,trigger="scheduler",status="running")
+        db.add(run)
         db.flush()
-        db.add(ScreenshotRequest(id="recovered", target="hourly", planned_at=state.clock[0],
-            room_json=state.room, run_id="stopped", status="captured", screenshots_json=[{"path": "test.png"}],
-            delivery_json={"status": "sending", "chat_id": "hourly-chat"}))
+        detail.latest_run_id,detail.status="interrupted-hour","running"
+        db.add(ScreenshotRequest(id=hourly.period_request_id(detail),target="hourly",schedule_id=schedule_id,
+            planned_at=detail.end_at,hour_index=1,run_id=run.id,status="capturing"))
         db.commit()
-    dispatcher = service.RunDispatcher(None)
-    dispatcher._recover_screenshot_requests()
+    restarted=service.RunDispatcher(None)
+    restarted._recover_screenshot_requests()
     with state.db() as db:
-        assert db.get(ScreenshotRequest, "recovered").delivery_json["status"] == "uncertain"
-    await dispatcher._deliver_screenshot_requests("stopped", state.settings)
-    assert not state.sends
+        assert db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.period_index==1)).status=="failed"
+    await restarted._check_due_schedules()
+    await drain(restarted)
+    assert len(state.captures)==1
+
+
+async def test_archive_deletes_hour_children_before_parent_and_keeps_local_data(state):
+    state.settings.update(bitable_app_token="test-base",bitable_table_id="test-table")
+    schedule_id=add_schedule(state)
+    dispatcher=service.RunDispatcher(None)
+    await collect_shift(state,dispatcher)
+    deleted=[]
+    original=service.BitableClient.delete_record
+    async def delete_record(self, record_id):
+        deleted.append(record_id)
+        await original(self,record_id)
+    service.BitableClient.delete_record=delete_record
+    try:
+        with state.db() as db:
+            parent_id=db.scalar(select(ShiftReport)).bitable_record_id
+            child_ids=[row.bitable_record_id for row in db.scalars(select(ShiftHourDetail).order_by(ShiftHourDetail.period_index))]
+        state.clock[0]=datetime(2026,11,1,8,tzinfo=APP_TIMEZONE)
+        archived,failed=await dispatcher._archive_cold_bitable_records(state.settings)
+        assert archived==1 and not failed
+        assert deleted==[*child_ids,parent_id]
+        with state.db() as db:
+            assert db.scalar(select(func.count(ShiftHourDetail.id)))==4
+            assert all(not row.bitable_record_id for row in db.scalars(select(ShiftHourDetail)))
+            assert db.get(ShiftHourState,schedule_id).parent_record_id==""
+    finally:
+        service.BitableClient.delete_record=original
