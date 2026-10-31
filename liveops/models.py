@@ -228,3 +228,35 @@ class ScreenshotRequest(Base):
     screenshots_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     delivery_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class BitableMonthTable(Base):
+    """Month routing plus ownership history; manually supplied tables are never deleted."""
+
+    __tablename__ = "bitable_month_tables"
+    __table_args__ = (UniqueConstraint("base_scope", "month_key", name="uq_bitable_month"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    base_scope: Mapped[str] = mapped_column(String(64), index=True)
+    month_key: Mapped[str] = mapped_column(String(7), index=True)
+    table_id: Mapped[str] = mapped_column(String(100), default="")
+    view_id: Mapped[str] = mapped_column(String(100), default="")
+    manual_override: Mapped[bool] = mapped_column(Boolean, default=False)
+    create_name: Mapped[str] = mapped_column(String(100), default="")
+    create_uncertain: Mapped[bool] = mapped_column(Boolean, default=False)
+    tables_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+                                               onupdate=lambda: datetime.now(timezone.utc))
+
+
+class BitableSyncReceipt(Base):
+    __tablename__ = "bitable_sync_receipts"
+    __table_args__ = (UniqueConstraint("scope", "sync_key", name="uq_bitable_sync_receipt"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope: Mapped[str] = mapped_column(String(64), index=True)
+    sync_key: Mapped[str] = mapped_column(String(200), index=True)
+    record_id: Mapped[str] = mapped_column(String(100))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(40), default="synced")
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

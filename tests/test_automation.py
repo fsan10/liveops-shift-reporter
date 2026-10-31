@@ -44,7 +44,8 @@ def state(monkeypatch):
     sessions = sessionmaker(engine, expire_on_commit=False)
     settings = {**DEFAULT_SETTINGS, "hourly_screenshot_enabled": "true", "feishu_app_id": "test-app",
         "feishu_app_secret": "test-secret", "feishu_chat_id": "anchor-chat", "feishu_hourly_chat_id": "hourly-chat",
-        "live_author_id": "author", "qianchuan_account_id": "account"}
+        "live_author_id": "author", "qianchuan_account_id": "account",
+        "bitable_table_month": "2026-10", "bitable_table_mode": "manual"}
     clock, counter = [at()], [100]
     captures, calls, sends, alerts, writes, failures = [], [], [], [], [], {}
     room = {"live_room_id": "101", "author_id": "author", "live_start": at(7, 0, 0).isoformat(),
@@ -75,6 +76,9 @@ def state(monkeypatch):
 
         async def ensure_hour_hierarchy(self, parent_field, view_id):
             return {"parent_field": parent_field, "field_id": "field-parent", "view_id": "view-hours"}
+
+        async def ensure_sync_key(self, field_name):
+            pass
 
         async def upsert_record(self, **kwargs):
             writes.append(kwargs)
@@ -499,7 +503,7 @@ async def test_restart_releases_incomplete_hour_state_without_resending_uncertai
     assert len(state.captures)==1
 
 
-async def test_archive_deletes_hour_children_before_parent_and_keeps_local_data(state):
+async def test_retention_preserves_manually_configured_table_and_all_local_hour_data(state):
     state.settings.update(bitable_app_token="test-base",bitable_table_id="test-table")
     schedule_id=add_schedule(state)
     dispatcher=service.RunDispatcher(None)
@@ -514,13 +518,13 @@ async def test_archive_deletes_hour_children_before_parent_and_keeps_local_data(
         with state.db() as db:
             parent_id=db.scalar(select(ShiftReport)).bitable_record_id
             child_ids=[row.bitable_record_id for row in db.scalars(select(ShiftHourDetail).order_by(ShiftHourDetail.period_index))]
-        state.clock[0]=datetime(2026,11,1,8,tzinfo=APP_TIMEZONE)
+        state.clock[0]=datetime(2027,3,1,8,tzinfo=APP_TIMEZONE)
         archived,failed=await dispatcher._archive_cold_bitable_records(state.settings)
-        assert archived==1 and not failed
-        assert deleted==[*child_ids,parent_id]
+        assert archived==0 and not failed
+        assert deleted==[]
         with state.db() as db:
             assert db.scalar(select(func.count(ShiftHourDetail.id)))==4
-            assert all(not row.bitable_record_id for row in db.scalars(select(ShiftHourDetail)))
-            assert db.get(ShiftHourState,schedule_id).parent_record_id==""
+            assert [row.bitable_record_id for row in db.scalars(select(ShiftHourDetail).order_by(ShiftHourDetail.period_index))]==child_ids
+            assert db.get(ShiftHourState,schedule_id).parent_record_id==parent_id
     finally:
         service.BitableClient.delete_record=original

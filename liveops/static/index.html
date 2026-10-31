@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0b1220">
   <title>直播运营数据台</title>
   <link rel="stylesheet" href="/static/style.css">
-  <link rel="stylesheet" href="/static/automation.css?v=20261030-queue-history">
+  <link rel="stylesheet" href="/static/automation.css?v=20261031-monthly-range">
 </head>
 <body>
   <div class="app-shell">
@@ -41,16 +41,17 @@
       </section>
 
       <section class="view" id="view-schedules">
-        <iframe id="roster-frame" src="/static/roster.html?v=20261022-roster-colors" title="直播间排班" loading="eager"></iframe>
+        <iframe id="roster-frame" src="/static/roster.html?v=20261031-roster-upload" title="直播间排班" loading="eager"></iframe>
       </section>
 
       <section class="view" id="view-reports">
-        <div class="page-intro"><div><h2>数据明细</h2><p>原始接口数据、计算字段和页面截图可按每个时段追溯。</p></div><div class="toolbar"><div class="date-picker-control"><input id="reports-date" class="date-picker-native" type="hidden"><div data-antd-date="reports-date"></div></div><button class="button button-secondary" id="export-csv">导出 CSV</button></div></div>
+        <div class="page-intro"><div><h2>数据明细</h2><p>按日期范围查看主播汇总、小时明细和同步结果，默认当天。</p></div><div class="toolbar"><div id="reports-tools" class="report-tools"></div><button class="button button-secondary" id="export-csv">导出 CSV</button></div></div>
         <article class="panel table-panel"><div class="panel-heading"><div><h3>主播直播数据表</h3><p>展示与多维表格同步的 25 项指标。</p></div><span class="panel-note" id="report-count"></span></div><div id="report-table" class="table-scroll"></div><div id="reports-pagination" class="pagination-wrap"></div></article>
       </section>
 
       <section class="view" id="view-runs">
         <div class="page-intro"><div><h2>采集记录</h2><p>查看自动采集、人工执行、基线任务和漏拍计划的状态及详情。</p></div></div>
+        <article class="panel run-filters-panel"><div id="runs-filters"></div></article>
         <article class="panel table-panel"><div class="panel-heading"><div><h3>采集运行记录</h3><p>点击记录查看执行结果、缺失字段和错误原因。</p></div><span class="panel-note" id="run-count"></span></div><div id="runs-table" class="table-scroll"></div><div id="runs-pagination" class="pagination-wrap"></div></article>
       </section>
 
@@ -82,9 +83,9 @@
             <label>小时明细文字模板<textarea id="hourly_message_template" rows="3"></textarea></label><small class="field-help">可用变量：{host_name}、{start_time}、{end_time}、{hour_index}、{duration_hours}、{gmv}、{overall_amount}、{overall_roi}、{planned_time}、{captured_time}</small>
             <div class="button-row"><button class="button button-secondary" id="check-feishu">检查应用凭证</button><button class="button button-secondary" id="test-feishu">测试主播群</button><button class="button button-secondary" id="test-feishu-hourly">测试业务群</button></div>
           </article>
-          <article class="panel settings-card"><div class="panel-heading"><div><h3>飞书多维表格</h3><p>多维表格只保留本月热数据；完整历史持续保存在本地数据库。</p></div><span id="bitable-state" class="state-pill">未检查</span></div>
-            <label>多维表格 app_token<input id="bitable_app_token"></label><label>数据表 table_id<input id="bitable_table_id"></label><label>幂等键列名<input id="bitable_sync_key_field" placeholder="SourceID"></label>
-            <label>小时明细父记录字段<input id="bitable_parent_field" placeholder="父记录"></label><label>小时明细层级视图 ID（可选）<input id="bitable_hourly_view_id" placeholder="留空自动建立“主播时段与小时明细”视图"></label><small class="field-help">主播汇总为父记录，小时明细为子记录。机器人需有字段、视图与记录编辑权限；SourceID 用于防止重复写入。</small>
+          <article class="panel settings-card"><div class="panel-heading"><div><h3>飞书多维表格</h3><p>每月一张数据表，保留当前月及前三个月；本地永久保留完整历史。</p></div><span id="bitable-state" class="state-pill">未检查</span></div>
+            <label>多维表格 app_token<input id="bitable_app_token"></label><label>本月同步数据表 table_id（可手动指定）<input id="bitable_table_id" placeholder="留空由机器人自动创建月表"></label><small id="bitable-routing-note" class="field-help"></small><label>幂等键列名<input id="bitable_sync_key_field" placeholder="SourceID"></label>
+            <label>小时明细父记录字段<input id="bitable_parent_field" placeholder="父记录"></label><label>小时明细层级视图 ID（可选）<input id="bitable_hourly_view_id" placeholder="留空复用当前表的表格视图"></label><small class="field-help">视图是同一张表的展示入口。默认复用已有表格视图展示父子记录，不额外创建重复视图；新月表只建立一个层级视图。机器人需有字段、视图和记录编辑权限。</small>
             <label>字段映射（JSON）<textarea id="bitable_field_mapping" rows="11" spellcheck="false"></textarea></label>
             <div class="button-row"><button class="button button-secondary" id="check-bitable">检查表格权限</button><button class="button button-secondary" id="load-fields">读取表头</button></div><div id="bitable-fields" class="field-chips"></div>
           </article>
@@ -105,7 +106,7 @@
   <dialog id="detail-dialog" class="modal modal-wide"><div class="modal-heading"><div><span class="eyebrow">COLLECTION DETAIL</span><h2 id="detail-title">采集详情</h2></div><button type="button" class="icon-button" data-close-dialog aria-label="关闭">×</button></div><div id="detail-content" class="detail-content"></div></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/static/settings-form.js?v=20261030-settings-compat" defer></script>
-  <script src="/static/app.js?v=20261030-queue-history" defer></script>
-  <script src="/static/widgets.bundle.js" defer></script>
+  <script src="/static/app.js?v=20261031-monthly-range" defer></script>
+  <script src="/static/widgets.bundle.js?v=20261031-monthly-range" defer></script>
 </body>
 </html>

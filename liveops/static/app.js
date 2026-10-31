@@ -4,11 +4,16 @@ const savedPageSize = key => {
   try { const value = Number(localStorage.getItem(`liveops-page-size-${key}`)); return [10, 20, 50, 100].includes(value) ? value : 20; }
   catch { return 20; }
 };
-const state = { view: "overview", date: new Date().toLocaleDateString("en-CA"), schedules: [], reports: [], runs: [], columns: [], settings: {}, secondPrecisionSupported: false, pagination: { reports: { page: 1, pageSize: savedPageSize("reports"), total: 0 }, runs: { page: 1, pageSize: savedPageSize("runs"), total: 0 } }, toastTimer: null, refreshing: false };
+const businessToday = () => new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Shanghai" });
+const defaultRunFilters = () => ({ start: `${businessToday()} 00:00:00`, end: `${businessToday()} 23:59:59`, timeField: "task", kinds: [], statuses: [] });
+const state = { view: "overview", date: businessToday(), reportRange: [businessToday(), businessToday()], runFilters: defaultRunFilters(), schedules: [], reports: [], runs: [], columns: [], settings: {}, secondPrecisionSupported: false, pagination: { reports: { page: 1, pageSize: savedPageSize("reports"), total: 0 }, runs: { page: 1, pageSize: savedPageSize("runs"), total: 0 } }, toastTimer: null, refreshing: false };
 const renderedHtml = new WeakMap();
 const expandedHourReports = new Set(), hourDetailCache = new Map();
 let settingsSchema = null;
 let automationStatus = null, queueCaptionIndex = 0;
+let reportRequestVersion = 0, runRequestVersion = 0;
+let backendFeatures = {};
+function updateBackendFeatures(status) { backendFeatures = status.features || {}; window.dispatchEvent(new Event("liveops:features-updated")); }
 let openDatePicker = null;
 let serviceChipText = "本地服务已运行";
 let rosterChipText = "";
@@ -52,7 +57,7 @@ function missingLabels(items) {
 }
 function stamp(value) { if (!value) return "—"; const iso = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`; return new Date(iso).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }); }
 function dateLabel(value) { return value ? value.replaceAll("-", ".") : ""; }
-function runLabel(run) { return ({ baseline: "千川累计基线", interruption: "中断片段采集", shift_hour: "主播小时明细", hourly_sync: "小时明细同步", hourly_screenshot: "历史小时截图", hourly_screenshot_plan: "每小时截图", anchor_screenshot_plan: "主播时段截图", hourly_watch: "直播状态检查", screenshot_delivery: "截图补发" })[run.kind] || "主播排班任务"; }
+function runLabel(run) { return ({ baseline: "千川累计基线", interruption: "中断片段采集", shift_hour: "主播小时明细", hourly_sync: "小时明细同步", bitable_sync: "飞书范围同步", hourly_screenshot: "历史小时截图", hourly_screenshot_plan: "每小时截图", anchor_screenshot_plan: "主播时段截图", hourly_watch: "直播状态检查", screenshot_delivery: "截图补发" })[run.kind] || "主播排班任务"; }
 function runTime(run) { return run.planned_at || run.started_at || run.created_at; }
 function renderHTML(node, html) { if (renderedHtml.get(node) === html) return; renderedHtml.set(node, html); node.innerHTML = html; }
 function toast(message, error = false) {
@@ -218,7 +223,7 @@ function hourDetailTable(parent, columns) {
   const rows = hourDetailCache.get(parent.id);
   if (!rows) return '<p class="panel-note">正在读取小时明细…</p>';
   const labels = { pending: "待采集", running: "采集中", missed: "漏采", failed: "采集失败", partial: "数据不完整", succeeded: "已采集" };
-  return `<div class="hour-detail-heading"><strong>${esc(parent.host_name)} · 时段小时明细</strong><span>独立累计基线；末段不足 2 小时合并。人数为累计计数净增量，GPM、互动率、停留保留段末卡片口径。</span><button class="small-button" data-hour-sync="${parent.id}">重试同步明细</button></div><div class="hour-detail-scroll"><table class="data-table hour-detail-table"><thead><tr><th>段次 / 状态</th>${columns.map(col => `<th>${esc(col.label)}</th>`).join("")}<th>累计基线 → 结束 GMV</th><th>多维表格</th><th>运行</th></tr></thead><tbody>${rows.map(row => {
+  return `<div class="hour-detail-heading"><strong>${esc(parent.host_name)} · 时段小时明细</strong><span>独立累计基线；末段不足 2 小时合并。人数为累计计数净增量，GPM、互动率、停留保留段末卡片口径。需要重试时，使用页面上方“同步到飞书”同步所选日期范围。</span></div><div class="hour-detail-scroll"><table class="data-table hour-detail-table"><thead><tr><th>段次 / 状态</th>${columns.map(col => `<th>${esc(col.label)}</th>`).join("")}<th>累计基线 → 结束 GMV</th><th>多维表格</th><th>运行</th></tr></thead><tbody>${rows.map(row => {
     const time = value => new Date(value).toLocaleTimeString("zh-CN", {timeZone:"Asia/Shanghai",hour:"2-digit",minute:"2-digit",hour12:false});
     const item = { ...parent, metrics: row.metrics, start_time: time(row.start_at), end_time: time(row.end_at) };
     const baseline = row.baseline?.source === "first_shift_zero" ? 0 : row.baseline?.counters?.gmv;
@@ -245,6 +250,7 @@ function runsTable(items) {
 }
 async function loadStatus() {
   const result = await api("/api/status");
+  updateBackendFeatures(result);
   serviceChipText = "本地服务已运行"; renderConnectionChip();
   $("#browser-mode").textContent = result.browser_mode === "native" ? "Playwright 原生浏览器" : "Cloak profile 已配置";
   $("#app-status-text").textContent = result.collector_modules_seeded ? `服务正常 · ${result.running_count} 个任务运行中` : "服务正常";
@@ -258,8 +264,11 @@ async function loadDashboard() {
   renderHTML($("#overview-schedules"), scheduleTable(state.schedules));
 }
 async function loadReportView() {
+  const requestVersion = ++reportRequestVersion;
   const page = state.pagination.reports;
-  const [result, columns] = await Promise.all([api(`/api/reports?work_date=${state.date}&page=${page.page}&page_size=${page.pageSize}`), api("/api/report-columns")]);
+  const dateQuery = backendFeatures.report_date_range ? reportRangeQuery() : new URLSearchParams({ work_date: state.reportRange[0] });
+  const [result, columns] = await Promise.all([api(`/api/reports?${dateQuery}&page=${page.page}&page_size=${page.pageSize}`), api("/api/report-columns")]);
+  if (requestVersion !== reportRequestVersion) return;
   const rows = result.items || [];
   const total = Number.isFinite(result.total) ? result.total : rows.length;
   const pages = Math.max(1, Math.ceil(total / page.pageSize));
@@ -270,13 +279,23 @@ async function loadReportView() {
   await Promise.all(state.reports.filter(row => expandedHourReports.has(row.id)).map(async row => {
     const detail = await api(`/api/reports/${row.id}/hours`); hourDetailCache.set(row.id, detail.items || []);
   }));
+  if (requestVersion !== reportRequestVersion) return;
   $("#report-count").textContent = `${integer(page.total)} 条记录`;
   renderHTML($("#report-table"), reportTable(state.reports));
   window.dispatchEvent(new CustomEvent("liveops:pagination-updated", { detail: { key: "reports", current: page.page, pageSize: page.pageSize, total: page.total } }));
 }
 async function loadRunsView() {
+  if (!backendFeatures.run_filters) {
+    $("#run-count").textContent = "等待后台升级";
+    renderHTML($("#runs-table"), empty("请重启直播运营后台后使用时间、类型和状态筛选。")); return;
+  }
+  const requestVersion = ++runRequestVersion;
   const page = state.pagination.runs;
-  const result = await api(`/api/runs?page=${page.page}&page_size=${page.pageSize}&limit=500`);
+  const filters = state.runFilters;
+  const query = new URLSearchParams({ start_at: filters.start.replace(" ", "T"), end_at: `${filters.end.replace(" ", "T")}.999999`,
+    time_field: filters.timeField, kinds: filters.kinds.join(","), statuses: filters.statuses.join(",") });
+  const result = await api(`/api/runs?${query}&page=${page.page}&page_size=${page.pageSize}`);
+  if (requestVersion !== runRequestVersion) return;
   const rows = result.items || [];
   const total = Number.isFinite(result.total) ? result.total : rows.length;
   const pages = Math.max(1, Math.ceil(total / page.pageSize));
@@ -407,8 +426,31 @@ function showDatePicker(trigger) {
 function setDate(value) {
   if (!value) return;
   state.date = value;
-  ["overview-date", "reports-date"].forEach(id => setPickerValue(id, value));
+  setPickerValue("overview-date", value);
 }
+function reportRangeQuery() { return new URLSearchParams({ date_start: state.reportRange[0], date_end: state.reportRange[1] }); }
+window.liveopsGetReportRange = () => [...state.reportRange];
+window.liveopsGetFeatures = () => ({ ...backendFeatures });
+window.liveopsReportRangeChange = values => {
+  if (!values?.[0] || !values?.[1]) return;
+  state.reportRange = [...values]; state.pagination.reports.page = 1;
+  window.dispatchEvent(new Event("liveops:report-range-updated"));
+  loadReportView().catch(showError);
+};
+window.liveopsGetRunFilters = () => ({ ...state.runFilters, kinds: [...state.runFilters.kinds], statuses: [...state.runFilters.statuses] });
+window.liveopsRunFiltersChange = filters => {
+  state.runFilters = filters; state.pagination.runs.page = 1;
+  window.dispatchEvent(new Event("liveops:run-filters-updated"));
+  loadRunsView().catch(showError);
+};
+window.liveopsResetRunFilters = () => window.liveopsRunFiltersChange(defaultRunFilters());
+window.liveopsGetPagination = key => ({ current: state.pagination[key].page, pageSize: state.pagination[key].pageSize, total: state.pagination[key].total });
+window.liveopsSyncRange = async values => {
+  if (!backendFeatures.bitable_monthly) throw new Error("请先重启直播运营后台，加载按月同步功能。");
+  const result = await api("/api/bitable/sync-range", { method: "POST", body: JSON.stringify(values) });
+  toast("范围同步已加入队列，可在采集记录查看进度。");
+  return result;
+};
 async function loadCollectors() {
   const { items } = await api("/api/collectors");
   $("#collector-cards").innerHTML = items.map(item => `<article class="collector-card" data-module="${esc(item.code)}"><div class="collector-top"><div><div class="collector-title">${esc(item.name)}</div><div class="collector-sub">${esc(item.page_kind)} · ${esc(item.notes || "")}</div></div><span class="collector-tag">${esc(item.section_label || "页面截图")}</span></div><label>截图方式<select data-module-field="screenshot_mode"><option value="element" ${item.screenshot_mode === "element" ? "selected" : ""}>指定 DOM 元素</option><option value="full_page" ${item.screenshot_mode === "full_page" ? "selected" : ""}>整页截图</option></select></label><label>栏目名称 / 区域标签<input data-module-field="section_label" value="${esc(item.section_label || "")}"></label><label>截图选择器（XPath 或 CSS）<input data-module-field="selector" value="${esc(item.selector || "")}" placeholder="可留空"></label><div class="collector-foot"><label class="toggle"><input data-module-field="enabled" type="checkbox" ${item.enabled ? "checked" : ""}><span class="toggle-track"></span>启用截图</label><button class="button button-secondary" data-module-save="${esc(item.code)}">保存步骤</button></div></article>`).join("");
@@ -441,6 +483,7 @@ async function loadSettings() {
   $("#feishu_app_secret").placeholder = settings.feishu_app_secret_configured ? settings.feishu_app_secret_masked : "未配置";
   $("#secret-configured").textContent = settings.feishu_app_secret_configured ? `App Secret 已加密保存：${settings.feishu_app_secret_masked}；留空会继续使用已保存的密钥。` : "尚未配置 App Secret。";
   $("#feishu-state").textContent = settings.feishu_app_secret_configured ? "密钥已保存" : "未配置";
+  $("#bitable-routing-note").textContent = `${settings.bitable_table_month || businessToday().slice(0, 7)} · ${settings.bitable_table_mode === "manual" ? "本月人工指定表" : "按月自动路由"}。下个月自动切换到新月表；仅自动清理超过 4 个月的机器人月表，人工创建的表保留。`;
 }
 function renderQueueCaption() {
   const node = $("#queue-caption"), result = automationStatus;
@@ -481,12 +524,14 @@ async function loadBitableFields() {
 async function exportCsv() {
   const button = $("#export-csv"); button.disabled = true;
   try {
-    const first = await api(`/api/reports?work_date=${state.date}&page=1&page_size=100`);
+    const exportRange = [...state.reportRange];
+    const rangeQuery = backendFeatures.report_date_range ? new URLSearchParams({ date_start: exportRange[0], date_end: exportRange[1] }) : new URLSearchParams({ work_date: exportRange[0] });
+    const first = await api(`/api/reports?${rangeQuery}&page=1&page_size=100`);
     const reports = [...(first.items || [])];
     if (Number.isFinite(first.total)) {
       const pages = Math.ceil((first.total || 0) / 100);
       for (let page = 2; page <= pages; page++) {
-        const result = await api(`/api/reports?work_date=${state.date}&page=${page}&page_size=100`);
+        const result = await api(`/api/reports?${rangeQuery}&page=${page}&page_size=100`);
         reports.push(...(result.items || []));
       }
     }
@@ -499,7 +544,7 @@ async function exportCsv() {
       return value ?? "";
     }))];
     const csv = "\ufeff" + rows.map(row => row.map(value => `"${String(value).replaceAll('"', '""')}"`).join(",")).join("\r\n");
-    const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" })); link.download = `直播数据_${state.date}.csv`; link.click(); URL.revokeObjectURL(link.href);
+    const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" })); link.download = `直播数据_${exportRange.join("至")}.csv`; link.click(); URL.revokeObjectURL(link.href);
   } catch (error) { showError(error); }
   finally { button.disabled = false; }
 }
@@ -553,7 +598,6 @@ document.addEventListener("click", async event => {
   const nav = event.target.closest("[data-view], [data-nav]");
   if (nav) { setView(nav.dataset.view || nav.dataset.nav); return; }
   const report = event.target.closest("[data-report-id]"); if (report) { showReport(report.dataset.reportId); return; }
-  const hourSync = event.target.closest("[data-hour-sync]"); if(hourSync) { hourSync.disabled = true; try { await api(`/api/reports/${Number(hourSync.dataset.hourSync)}/sync-hours`, {method:"POST"}); toast("已开始同步小时明细，不会重新采集或截图"); } catch(error) { showError(error); } finally {hourSync.disabled = false;} return; }
   const hourToggle = event.target.closest("[data-hour-toggle]");
   const hourRow = event.target.closest("[data-hour-row]");
   if (hourToggle || (hourRow && !event.target.closest("button,a,input,select") && hourRow.querySelector("[data-hour-toggle]"))) { try { await toggleHourDetails(Number(hourToggle?.dataset.hourToggle || hourRow.dataset.hourRow)); } catch(error) { showError(error); } return; }
@@ -586,12 +630,12 @@ $("#go-schedules").addEventListener("click", () => setView("schedules"));
 $("#refresh-button").addEventListener("click", refreshAll); $("#refresh-collectors").addEventListener("click", () => loadCollectors().catch(showError));
 $("#save-settings").addEventListener("click", saveSettings); $("#check-feishu").addEventListener("click", () => checkFeishu(false)); $("#test-feishu").addEventListener("click", () => checkFeishu(true)); $("#check-bitable").addEventListener("click", checkBitable); $("#load-fields").addEventListener("click", loadBitableFields); $("#export-csv").addEventListener("click", exportCsv);
 $("#test-feishu-hourly").addEventListener("click", () => checkFeishu(true, "hourly"));
-[["#overview-date", "overview"], ["#reports-date", "reports"]].forEach(([selector, view]) => $(selector).addEventListener("change", async event => { setPickerValue(event.target.id, event.target.value); setDate(event.target.value); if (view === "reports") state.pagination.reports.page = 1; try { await refreshVisibleView(); } catch (error) { showError(error); } }));
+$("#overview-date").addEventListener("change", async event => { setPickerValue(event.target.id, event.target.value); setDate(event.target.value); try { await refreshVisibleView(); } catch (error) { showError(error); } });
 $("#detail-dialog").addEventListener("close", closeDatePicker);
 window.addEventListener("resize", closeDatePicker);
 async function start() {
   setDate(state.date);
-  try { const [{ items: columns }, { settings }, status] = await Promise.all([api("/api/report-columns"), api("/api/settings"), api("/api/status")]); state.columns = columns; state.settings = settings; state.secondPrecisionSupported = status.second_precision_supported === true; $("#shop-name").textContent = settings.shop_name || "店铺未配置"; $("#browser-mode").textContent = status.browser_mode === "native" ? "Playwright 原生浏览器" : "Cloak profile 已配置"; await refreshVisibleView(); }
+  try { const [{ items: columns }, { settings }, status] = await Promise.all([api("/api/report-columns"), api("/api/settings"), api("/api/status")]); state.columns = columns; state.settings = settings; state.secondPrecisionSupported = status.second_precision_supported === true; updateBackendFeatures(status); $("#shop-name").textContent = settings.shop_name || "店铺未配置"; $("#browser-mode").textContent = status.browser_mode === "native" ? "Playwright 原生浏览器" : "Cloak profile 已配置"; await refreshVisibleView(); }
   catch (error) { showError(error); $("#app-status-text").textContent = "服务连接失败"; }
   setInterval(() => { if (document.hidden || $('dialog[open]')) return; if (state.view === "schedules") loadStatus().catch(showError); else refreshAll(); }, 7000);
 }

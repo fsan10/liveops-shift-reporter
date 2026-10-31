@@ -66,6 +66,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "feishu_alert_open_id": "",
     "bitable_app_token": "",
     "bitable_table_id": "",
+    "bitable_table_month": "",
+    "bitable_table_mode": "",
     "bitable_sync_key_field": "SourceID",
     "bitable_parent_field": "父记录",
     "bitable_hourly_view_id": "",

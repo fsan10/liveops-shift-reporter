@@ -27,6 +27,7 @@ from liveops.models import (
     ShiftReport,
     ShiftSchedule,
 )
+from liveops.monthly import MonthlyBitableAutomation, base_ready, hot_month_start, table_scope
 from liveops.portal import qianchuan_snapshot, report_source_values
 from liveops.segments import recompute_segments
 from liveops.settings import SettingsStore, db_settings, screenshot_chat, setting_enabled
@@ -97,12 +98,7 @@ def _integration_ready(settings: dict[str, str], prefix: str) -> bool:
             and settings.get("feishu_app_secret")
             and settings.get("feishu_chat_id")
         )
-    return bool(
-        settings.get("feishu_app_id")
-        and settings.get("feishu_app_secret")
-        and settings.get("bitable_app_token")
-        and settings.get("bitable_table_id")
-    )
+    return prefix == "bitable" and base_ready(settings)
 
 
 def _baseline_from_report(report: ShiftReport) -> dict[str, Any] | None:
@@ -341,7 +337,7 @@ def integration_not_configured_status(settings: dict[str, str], integration: str
     return "not_configured: 尚缺 " + "、".join(missing)
 
 
-class RunDispatcher(ShiftHourlyAutomation, ScreenshotAutomation):
+class RunDispatcher(ShiftHourlyAutomation, MonthlyBitableAutomation, ScreenshotAutomation):
     def __init__(self, settings_store: SettingsStore) -> None:
         self.settings_store = settings_store
         self._browser_lock = asyncio.Lock()
@@ -354,6 +350,7 @@ class RunDispatcher(ShiftHourlyAutomation, ScreenshotAutomation):
         self._bitable_retention_checked_month = ""
         self._bitable_retention_retry_at: datetime | None = None
         self._scheduler_task: asyncio.Task[Any] | None = None
+        self._init_monthly_bitable()
         self._init_screenshots()
 
     def _automation_db(self) -> Any:
@@ -690,7 +687,12 @@ class RunDispatcher(ShiftHourlyAutomation, ScreenshotAutomation):
                 self._bitable_retention_retry_at is None or now >= self._bitable_retention_retry_at
             )
         ):
-            archived, failed = await self._archive_cold_bitable_records(values)
+            try:
+                values = await self._bitable_settings_for_date(values, now.date())
+                archived, failed = await self._archive_cold_bitable_records(values)
+            except Exception:
+                logger.exception("Monthly Bitable table maintenance failed")
+                archived, failed = 0, ["monthly-table"]
             if failed:
                 self._bitable_retention_retry_at = now + timedelta(minutes=15)
                 logger.warning(
@@ -1327,63 +1329,8 @@ class RunDispatcher(ShiftHourlyAutomation, ScreenshotAutomation):
             )
         return changed
 
-    async def _archive_cold_bitable_records(
-        self, settings: dict[str, str]
-    ) -> tuple[int, list[str]]:
-        cutoff = _month_start(now_local().date())
-        with SessionLocal() as db:
-            rows = db.scalars(
-                select(ShiftReport).where(
-                    ShiftReport.work_date < cutoff,
-                    ShiftReport.bitable_record_id != "",
-                )
-            ).all()
-            records = [(row.id, row.bitable_record_id) for row in rows]
-        if not records or not _integration_ready(settings, "bitable"):
-            return 0, []
-
-        client = BitableClient(
-            settings["feishu_app_id"],
-            settings["feishu_app_secret"],
-            settings["bitable_app_token"],
-            settings["bitable_table_id"],
-        )
-        archived_ids: list[int] = []
-        failed: list[str] = []
-        try:
-            for report_id, record_id in records:
-                try:
-                    with SessionLocal() as db:
-                        schedule_id = db.get(ShiftReport, report_id).schedule_id
-                    await self._archive_hour_children(schedule_id, client, settings)
-                    await client.delete_record(record_id)
-                    archived_ids.append(report_id)
-                except Exception as exc:
-                    logger.warning(
-                        "Bitable cold-row deletion failed for report %s: %s",
-                        report_id,
-                        exc,
-                    )
-                    failed.append(str(report_id))
-        finally:
-            await client.close()
-
-        if archived_ids:
-            with SessionLocal() as db:
-                archived_rows = db.scalars(
-                    select(ShiftReport).where(ShiftReport.id.in_(archived_ids))
-                ).all()
-                for row in archived_rows:
-                    from liveops.models import ShiftHourState
-
-                    binding = db.get(ShiftHourState, row.schedule_id)
-                    if binding:
-                        binding.parent_record_id = ""
-                    row.bitable_record_id = ""
-                    row.bitable_status = "archived: 仅保存在本地数据库"
-                    row.synced_at = utc_now()
-                db.commit()
-        return len(archived_ids), failed
+    async def _archive_cold_bitable_records(self, settings: dict[str, str]) -> tuple[int, list[str]]:
+        return await self._archive_cold_bitable_tables(settings)
 
     async def _sync_integrations(
         self, schedule_id: int, settings: dict[str, str], run_id: str,
@@ -1392,21 +1339,21 @@ class RunDispatcher(ShiftHourlyAutomation, ScreenshotAutomation):
     ) -> None:
         lock = self._integration_locks.setdefault(schedule_id, asyncio.Lock())
         async with lock:
-            await self._sync_integrations_locked(
+            resolved = await self._sync_integrations_locked(
                 schedule_id, settings, run_id, feishu_task, send_feishu
             )
-        await self._sync_hourly_bitable(schedule_id, settings, run_id)
+        await self._sync_hourly_bitable(schedule_id, {**(resolved or settings), "_bitable_pin_target": "true"}, run_id)
 
     async def _sync_integrations_locked(
         self, schedule_id: int, settings: dict[str, str], run_id: str,
         feishu_task: asyncio.Task[str] | None,
         send_feishu: bool,
-    ) -> None:
+    ) -> dict[str, str]:
         with SessionLocal() as db:
             report = db.scalar(select(ShiftReport).where(ShiftReport.schedule_id == schedule_id))
             schedule = db.get(ShiftSchedule, schedule_id)
             if report is None or schedule is None:
-                return
+                return settings
             metrics = dict(report.metrics_json or {})
             screenshots = list(report.screenshots_json or [])
             mapping_raw = settings.get("bitable_field_mapping", "{}")
@@ -1429,9 +1376,6 @@ class RunDispatcher(ShiftHourlyAutomation, ScreenshotAutomation):
             report_id = report.id
             record_id = report.bitable_record_id
             report_date = report.work_date
-            from liveops.models import ShiftHourDetail
-
-            has_hours = db.scalar(select(ShiftHourDetail.id).where(ShiftHourDetail.schedule_id == schedule_id).limit(1)) is not None
 
         if feishu_task is None and send_feishu:
             feishu_task = asyncio.create_task(
@@ -1441,48 +1385,29 @@ class RunDispatcher(ShiftHourlyAutomation, ScreenshotAutomation):
         bitable_status = integration_not_configured_status(settings, "bitable")
         new_record_id = record_id
         if _integration_ready(settings, "bitable"):
-            if report_date < _month_start(now_local().date()):
-                bitable_status = "local_only: 本地数据库保留完整历史，多维表格只保留本月热数据"
-                new_record_id = ""
-                self._log_step(run_id, "bitable", "历史月份报告仅保存在本地数据库。", "skipped")
+            if report_date < hot_month_start(now_local().date()):
+                bitable_status = "local_only: 本地永久保存；飞书仅同步当前月及前三个月"
+                self._log_step(run_id, "bitable", "超出近四个月热数据范围，保留本地完整历史。", "skipped")
             else:
-                self._log_step(run_id, "bitable", "开始同步本月报告到飞书多维表格。")
-                archived_count, archive_failures = await self._archive_cold_bitable_records(
-                    settings
-                )
-                client = BitableClient(
-                    settings["feishu_app_id"],
-                    settings["feishu_app_secret"],
-                    settings["bitable_app_token"],
-                    settings["bitable_table_id"],
-                )
+                client = None
                 try:
-                    result = await client.upsert_record(
-                        values=payload_values,
-                        field_mapping=mapping,
-                        record_id=record_id,
-                        sync_key_field=settings.get("bitable_sync_key_field", ""),
-                        sync_key=f"shift-{schedule_id}",
-                        lookup_sync_key=has_hours,
-                    )
-                    new_record_id = result.get("record_id", record_id)
-                    bitable_status = "partial" if result.get("missing_mappings") else "synced"
-                    details: list[str] = []
-                    if result.get("missing_mappings"):
-                        details.append("缺少列 " + ", ".join(result["missing_mappings"]))
-                    if archive_failures:
-                        details.append(f"{len(archive_failures)} 条上月记录未能归档")
-                    if details:
-                        bitable_status = "partial: " + "；".join(details)
-                    elif archived_count:
-                        logger.info("Archived %s old Bitable report row(s)", archived_count)
-                    self._log_step(run_id, "bitable", "多维表格同步完成。", "succeeded")
+                    settings = await self._bitable_settings_for_date(settings, report_date)
+                    self._log_step(run_id, "bitable", f"同步到 {report_date:%Y-%m} 月表。")
+                    client = BitableClient(settings["feishu_app_id"], settings["feishu_app_secret"],
+                                           settings["bitable_app_token"], settings["bitable_table_id"])
+                    result = await self._write_bitable_record(client, settings,
+                        values=payload_values, field_mapping=mapping, sync_key=f"shift-{schedule_id}")
+                    new_record_id = result["record_id"]
+                    bitable_status = ("partial: 缺少列 " + ", ".join(result["missing_mappings"])) if result.get("missing_mappings") else "synced"
+                    self._log_step(run_id, "bitable", "数据未变更，已跳过。" if result.get("skipped") else "多维表格同步完成。",
+                                   "partial" if result.get("missing_mappings") else "succeeded")
                 except Exception as exc:
                     logger.warning("Bitable sync failed for report %s: %s", report_id, exc)
                     bitable_status = f"failed: {str(exc)[:500]}"
                     self._log_step(run_id, "bitable", f"同步失败：{str(exc)[:300]}", "failed")
                 finally:
-                    await client.close()
+                    if client:
+                        await client.close()
         else:
             self._log_step(run_id, "bitable", bitable_status, "skipped")
 
@@ -1494,5 +1419,8 @@ class RunDispatcher(ShiftHourlyAutomation, ScreenshotAutomation):
                 current.feishu_status = feishu_status
                 current.bitable_status = bitable_status
                 current.bitable_record_id = new_record_id or ""
+                if bitable_status == "synced" and settings.get("bitable_table_id"):
+                    current.raw_json = {**current.raw_json, "bitable_scope": table_scope(settings)}
                 current.synced_at = utc_now()
                 db.commit()
+        return {**settings, "_bitable_parent_synced": str(bitable_status == "synced").lower()}

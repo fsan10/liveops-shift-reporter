@@ -187,3 +187,99 @@ def test_run_history_includes_missed_plans_in_local_time_without_duplicate_execu
     assert api_client.get("/api/runs/screenshot-request:pending-23").status_code == 404
     assert api_client.get("/api/runs?page=4&page_size=2").json()["items"] == []
     assert api_client.get("/api/status").json()["running_count"] == 0
+
+
+def test_report_date_range_filters_before_pagination_and_keeps_day_query_compatible(api_client):
+    from datetime import date, time
+
+    from liveops.models import CollectionRun, ShiftReport, ShiftSchedule
+
+    with service.SessionLocal() as db:
+        for index, day in enumerate([date(2026, 10, 1), date(2026, 10, 15), date(2026, 11, 1)]):
+            schedule = ShiftSchedule(work_date=day, start_time=time(7), end_time=time(11), host_name="测试主播", live_room_id="test")
+            db.add(schedule)
+            db.flush()
+            run = CollectionRun(id=f"date-range-{index}", schedule_id=schedule.id, kind="report", trigger="scheduler", status="succeeded")
+            db.add(run)
+            db.flush()
+            db.add(ShiftReport(schedule_id=schedule.id, latest_run_id=run.id, work_date=day, start_time=time(7), end_time=time(11),
+                host_name="测试主播", shop_name="test", live_room_id="test", metrics_json={"gmv": index + 1}))
+        db.commit()
+    first = api_client.get("/api/reports?date_start=2026-10-01&date_end=2026-10-31&page_size=1").json()
+    second = api_client.get("/api/reports?date_start=2026-10-01&date_end=2026-10-31&page_size=1&page=2").json()
+    assert first["total"] == second["total"] == 2
+    assert first["items"][0]["work_date"] == "2026-10-15"
+    assert second["items"][0]["work_date"] == "2026-10-01"
+    assert api_client.get("/api/reports?work_date=2026-10-15").json()["total"] == 1
+    assert api_client.get("/api/reports?date_start=2026-11-01&date_end=2026-10-01").status_code == 422
+
+
+def test_run_time_field_kind_and_status_filters_include_only_real_matching_times(api_client):
+    from datetime import datetime, timezone
+
+    from liveops.models import CollectionRun, ScreenshotRequest
+    from liveops.portal import APP_TIMEZONE
+
+    def local(day, hour, minute=0):
+        return datetime(2026, 10, day, hour, minute, tzinfo=APP_TIMEZONE)
+
+    midnight = datetime(2026, 11, 1, tzinfo=APP_TIMEZONE)
+    with service.SessionLocal() as db:
+        for key, kind, status, task_at, finished in [
+            ("cross-midnight", "report", "succeeded", local(31, 23, 45), midnight.replace(minute=5)),
+            ("hour-partial", "shift_hour", "partial", local(31, 22), local(31, 22, 1)),
+            ("november-failed", "baseline", "failed", midnight.replace(hour=1), midnight.replace(hour=1, minute=1)),
+        ]:
+            db.add(CollectionRun(id=key, kind=kind, trigger="scheduler", status=status,
+                created_at=task_at.astimezone(timezone.utc), started_at=task_at.astimezone(timezone.utc),
+                finished_at=finished.astimezone(timezone.utc)))
+        db.add(ScreenshotRequest(id="missed-at-23", target="hourly", status="missed", planned_at=local(31, 23),
+            created_at=midnight.replace(hour=2).astimezone(timezone.utc)))
+        db.commit()
+    query = "/api/runs?start_at=2026-10-31T00:00:00&end_at=2026-10-31T23:59:59"
+    assert api_client.get(query).json()["total"] == 3
+    assert api_client.get(query + "&page_size=1").json()["total"] == 3
+    finished = api_client.get(query + "&time_field=finished").json()
+    assert [row["id"] for row in finished["items"]] == ["hour-partial"]
+    missed = api_client.get(query + "&kinds=hourly_screenshot_plan&statuses=missed").json()
+    assert missed["total"] == 1 and missed["items"][0]["id"] == "screenshot-request:missed-at-23"
+    assert api_client.get(query + "&kinds=hourly_screenshot_plan&time_field=finished").json()["total"] == 0
+    next_day = api_client.get("/api/runs?start_at=2026-11-01T00:00:00&end_at=2026-11-01T23:59:59&time_field=finished&statuses=succeeded").json()
+    assert [row["id"] for row in next_day["items"]] == ["cross-midnight"]
+    assert api_client.get(query + "&kinds=report,shift_hour&statuses=partial").json()["total"] == 1
+    assert api_client.get(query + "&time_field=created").status_code == 422
+    assert api_client.get(query + "&statuses=invalid").status_code == 422
+    assert api_client.get("/api/runs?start_at=2026-11-01T00:00:00&end_at=2026-10-31T00:00:00").status_code == 422
+
+
+def test_manual_target_is_month_scoped_and_changing_base_clears_old_table_and_view(api_client):
+    from sqlalchemy import select
+
+    from liveops.models import BitableMonthTable
+
+    result = api_client.put("/api/settings", json={"values": {"bitable_app_token": "test-base", "bitable_table_id": "manual-a",
+        "bitable_hourly_view_id": "view-a"}})
+    assert result.status_code == 200
+    saved = result.json()["settings"]
+    assert saved["bitable_table_mode"] == "manual"
+    assert saved["bitable_table_month"] == service.now_local().strftime("%Y-%m")
+    with service.SessionLocal() as db:
+        row = db.scalar(select(BitableMonthTable))
+        assert row.manual_override and row.table_id == "manual-a" and row.view_id == "view-a"
+        assert row.tables_json[0]["managed"] is False
+    assert api_client.put("/api/settings", json={"values": {"bitable_table_month": "2026-01"}}).status_code == 422
+    changed = api_client.put("/api/settings", json={"values": {"bitable_app_token": "another-base"}}).json()["settings"]
+    assert changed["bitable_table_id"] == "" and changed["bitable_hourly_view_id"] == ""
+    assert changed["bitable_table_mode"] == "automatic"
+
+
+@pytest.mark.parametrize("values", [{"bitable_field_mapping": "[]"}, {"bitable_field_mapping": '{"gmv":1}'},
+                                    {"bitable_sync_key_field": ""}, {"bitable_parent_field": "  "}])
+def test_invalid_bitable_schema_settings_are_rejected_before_background_work(api_client, values):
+    assert api_client.put("/api/settings", json={"values": values}).status_code == 422
+
+
+def test_range_sync_endpoint_validates_dates_and_does_not_accept_empty_or_cold_range(api_client):
+    assert api_client.post("/api/bitable/sync-range", json={"date_start": "2026-10-31", "date_end": "2026-10-01", "mode": "full"}).status_code == 422
+    assert api_client.post("/api/bitable/sync-range", json={"date_start": "2026-10-01", "date_end": "2026-10-31", "mode": "unknown"}).status_code == 422
+    assert api_client.post("/api/bitable/sync-range", json={"date_start": "2020-01-01", "date_end": "2020-01-31", "mode": "incremental"}).status_code == 422

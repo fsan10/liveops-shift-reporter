@@ -314,7 +314,7 @@
   .import-modal button:disabled{opacity:.5}
   .import-body{padding:18px 22px;overflow:auto;display:grid;gap:14px}
   .import-help{color:var(--muted);font-size:13px;line-height:1.8;margin:0}
-  .import-tools{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .import-tools{display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap}
   .import-tools a{display:inline-flex;align-items:center;text-decoration:none}
   .import-result{max-height:42vh;overflow:auto;border:1px solid #e0e6ef;border-radius:8px}
   .import-result table{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}
@@ -348,7 +348,7 @@
     <input id="searchInput" placeholder="搜索主播 / 投手 / 日期">
   </div>
   <button class="tbtn" id="autoBtn">✦ 自动排班</button>
-  <button class="tbtn" id="importBtn" type="button">导入 Excel</button>
+  <button class="tbtn" id="importBtn" type="button">导入排班</button>
   <button class="tbtn" id="exportBtn">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
     导出排班
@@ -451,10 +451,10 @@
 
 <div class="mask" id="importMask">
   <div class="modal import-modal" role="dialog" aria-modal="true" aria-labelledby="importTitle">
-    <div class="modal-h"><span id="importTitle">导入 Excel 排班</span><button class="x" id="importClose" aria-label="关闭">×</button></div>
+    <div class="modal-h"><span id="importTitle">导入排班</span><button class="x" id="importClose" aria-label="关闭">×</button></div>
     <div class="import-body">
       <p class="import-help">每行一个班次，必填日期、时段、主播，可填写投手、休息和日常拍摄。支持 .xlsx 和本系统导出的 .csv，最多 5 MB、2000 行，只读取第一张工作表。<br>跨午夜可填写 20:30-01:00。同日后续行可留空日期。历史日期和重复内容跳过；冲突或格式错误需修正后整批导入。导入按文件日期新增，保留已有排班和非空备注。</p>
-      <div class="import-tools"><a class="btn ghost" href="/api/schedules/import-template" download>下载 Excel 模板</a><input type="file" id="importFile" accept=".xlsx,.csv" aria-label="选择排班文件"><button class="btn ghost" id="importPreview" type="button">预览并校验</button></div>
+      <div class="import-tools"><a class="btn ghost" href="/api/schedules/import-template" download>下载 Excel 模板</a><input type="file" id="importFile" accept=".xlsx,.csv" hidden aria-label="选择排班文件"><div id="roster-file-upload"></div><button class="btn ghost" id="importPreview" type="button">预览并校验</button></div>
       <div id="importSummary" role="status" aria-live="polite">选择文件后预览，确认内容再导入。</div>
       <div class="import-result" id="importResult" hidden></div>
     </div>
@@ -2452,7 +2452,8 @@ async function submitRosterImport(preview){
 }
 document.getElementById('importBtn').addEventListener('click',()=>{
   resetImportPreview();document.getElementById('importFile').value='';
-  document.getElementById('importMask').classList.add('show');document.getElementById('importFile').focus();
+  window.dispatchEvent(new Event('liveops:roster-upload-reset'));
+  document.getElementById('importMask').classList.add('show');document.querySelector('#roster-file-upload button')?.focus();
 });
 document.getElementById('importFile').addEventListener('change',resetImportPreview);
 document.getElementById('importPreview').addEventListener('click',()=>submitRosterImport(true));
@@ -2536,5 +2537,6 @@ window.addEventListener('message',event=>{
   syncPromise.then(()=>loadRemote()).catch(error=>toast(error.message||String(error),'err'));
 });
 </script>
+<script src="/static/widgets.bundle.js?v=20261031-monthly-range" defer></script>
 </body>
 </html>

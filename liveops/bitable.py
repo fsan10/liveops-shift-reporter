@@ -19,14 +19,15 @@ class BitableClient:
         self.app_token = app_token.strip()
         self.table_id = table_id.strip()
         self._token = ""
+        self._fields_cache: list[dict[str, Any]] | None = None
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(40.0, connect=15.0))
 
     async def close(self) -> None:
         await self._http.aclose()
 
     def _check(self) -> None:
-        if not all((self.app_id, self.app_secret, self.app_token, self.table_id)):
-            raise FeishuError("请配置飞书 App ID、App Secret、多维表格 app_token 和 table_id。")
+        if not all((self.app_id, self.app_secret, self.app_token)):
+            raise FeishuError("请配置飞书 App ID、App Secret 和多维表格 app_token。")
 
     async def _access_token(self) -> str:
         self._check()
@@ -53,15 +54,54 @@ class BitableClient:
         return _json_response(response)
 
     async def list_fields(self) -> list[dict[str, Any]]:
-        return await self._list_all("fields")
+        if self._fields_cache is None:
+            self._fields_cache = await self._list_all("fields")
+        return self._fields_cache
+
+    async def list_tables(self) -> list[dict[str, Any]]:
+        return await self._list_resource(f"/bitable/v1/apps/{self.app_token}/tables")
+
+    async def list_views(self) -> list[dict[str, Any]]:
+        return await self._list_all("views")
+
+    async def create_table(self, name: str, fields: list[dict[str, Any]]) -> dict[str, str]:
+        payload = await self._request("POST", f"/bitable/v1/apps/{self.app_token}/tables", json={"table": {
+            "name": name, "default_view_name": "主播时段与小时明细", "fields": fields}})
+        data = payload.get("data") or {}
+        if not data.get("table_id"):
+            raise FeishuError("飞书未返回新月表 ID，创建结果待确认；重试会先按已保存名称核对。")
+        return {"table_id": str(data["table_id"]), "view_id": str(data.get("default_view_id") or "")}
+
+    async def delete_table(self, table_id: str) -> None:
+        if not table_id.strip():
+            raise FeishuError("待删除的数据表 ID 为空。")
+        payload = await self._request("DELETE", f"/bitable/v1/apps/{self.app_token}/tables/{table_id}")
+        if (payload.get("data") or {}).get("deleted") is False:
+            raise FeishuError("飞书未确认删除历史月表。")
+
+    async def ensure_sync_key(self, field_name: str) -> None:
+        if not field_name.strip():
+            raise FeishuError("请配置 SourceID 幂等键列名。")
+        field = next((row for row in await self.list_fields() if row.get("field_name") == field_name), None)
+        if field is None:
+            await self._request("POST", f"/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/fields",
+                                json={"field_name": field_name, "type": 1})
+            self._fields_cache = None
+        elif int(field.get("type", 0)) != 1:
+            raise FeishuError("SourceID 幂等键列必须是文本字段，不会覆盖已有列。")
 
     async def _list_all(self, resource: str) -> list[dict[str, Any]]:
+        if not self.table_id:
+            raise FeishuError("尚未选定月表，请等待自动建表或人工填写 table_id。")
+        return await self._list_resource(f"/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/{resource}")
+
+    async def _list_resource(self, path: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         token = ""
         seen: set[str] = set()
         while True:
             params = {"page_size": 100, **({"page_token": token} if token else {})}
-            payload = await self._request("GET", f"/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/{resource}", params=params)
+            payload = await self._request("GET", path, params=params)
             data = payload.get("data") or {}
             if not isinstance(data.get("items"), list):
                 raise FeishuError("多维表格列表结构不完整，停止修改字段或视图。")
@@ -83,14 +123,14 @@ class BitableClient:
             payload = await self._request("POST", f"{root}/fields", json={"field_name": parent_field,
                 "type": 18, "property": {"table_id": self.table_id, "multiple": False}})
             field = (payload.get("data") or {}).get("field") or {}
+            self._fields_cache = None
         if int(field.get("type", 0)) != 18 or (field.get("property") or {}).get("table_id") != self.table_id:
             raise FeishuError("父记录字段必须是关联当前数据表的单向关联字段；不会覆盖已有字段。")
         if not field.get("field_id"):
             raise FeishuError("多维表格未返回父记录字段 ID。")
         if not view_id:
             name = "主播时段与小时明细"
-            view = next((row for row in await self._list_all("views") if row.get("view_name") == name
-                         and row.get("view_type") == "grid"), None)
+            view = next((row for row in await self.list_views() if row.get("view_type") == "grid"), None)
             if view is None:
                 payload = await self._request("POST", f"{root}/views", json={"view_name": name, "view_type": "grid"})
                 view = (payload.get("data") or {}).get("view") or {}
@@ -152,7 +192,7 @@ class BitableClient:
         if not fields:
             raise FeishuError("多维表格字段映射为空；请核对配置页的列名和实际表头。")
         endpoint = f"/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records"
-        if lookup_sync_key and not record_id:
+        if lookup_sync_key:
             if not sync_key or effective_sync_key_field not in fields_by_name:
                 raise FeishuError("小时明细同步需要可用的 SourceID 幂等键字段。")
             matches = await self._request("POST", f"{endpoint}/search", json={"filter": {

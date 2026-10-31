@@ -14,6 +14,11 @@
 .hour-toggle{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;background:#eef2ff;color:#3558bd;border:0;border-radius:7px;padding:7px 10px;font-size:12px}
 .hour-chevron{display:block;flex:0 0 14px;width:14px;height:14px;transform-origin:center;transition:transform .2s}.hour-chevron.is-open{transform:rotate(90deg)}
 .hour-baseline-note{display:block;margin-top:5px;color:#64748c;font-size:11px;white-space:nowrap}
+.report-tools{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.run-filters-panel{padding:16px;margin-bottom:16px}.run-filter-controls{width:100%}.run-time-range{width:450px}
+.sync-range-label{color:#47566f}.sync-mode-options{display:block;margin:18px 0}.sync-mode-options .ant-radio-wrapper{align-items:flex-start;line-height:1.7}.sync-mode-help{display:block;max-width:390px;font-size:12px;color:#748197;margin-top:4px}
+.sync-mode-options .ant-radio{align-self:flex-start;margin-top:4px}
+@media(max-width:760px){.run-time-range{width:100%}.report-tools{width:100%}.report-tools .ant-picker-range{width:100%}.run-filter-controls .ant-space-item:has(.run-time-range){width:100%}.page-intro:has(#reports-tools){align-items:flex-start;flex-wrap:wrap}}
 .hour-drawer-row>td{padding:0!important;border-bottom:0!important}.hour-drawer{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows .24s ease,opacity .2s ease}.hour-drawer.is-open{grid-template-rows:1fr;opacity:1}
 .hour-drawer-clip{overflow:hidden;min-height:0}.hour-drawer-content{padding:18px 22px 22px;background:#f4f7fc;border-left:3px solid #7d96e8}
 .hour-detail-heading{display:flex;flex-wrap:wrap;gap:9px 18px;align-items:center;margin-bottom:14px;color:#283c60;font-size:13px}.hour-detail-heading span{color:#64748c;font-size:12px}.hour-detail-scroll{overflow:auto;max-height:470px}

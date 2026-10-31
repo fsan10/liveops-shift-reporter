@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -24,6 +23,7 @@ from liveops.models import (
     ShiftReport,
     ShiftSchedule,
 )
+from liveops.monthly import base_ready, hot_month_start, table_scope
 from liveops.portal import schedule_end_datetime, shift_datetime
 from liveops.sessions import local_datetime
 from liveops.settings import screenshot_chat, setting_enabled
@@ -448,11 +448,24 @@ class ShiftHourlyAutomation:
                 ShiftHourDetail.status.in_(["succeeded", "partial", "missed"]))).all()
         if not rows:
             return
-        ready = all(settings.get(key) for key in ("feishu_app_id", "feishu_app_secret", "bitable_app_token", "bitable_table_id"))
+        ready = base_ready(settings)
         if not ready:
             with self._automation_db() as db:
                 for row in rows:
                     db.get(ShiftHourDetail, row.id).bitable_status = "not_configured: 多维表格未完整配置"
+                db.commit()
+            return
+        with self._automation_db() as db:
+            work_date = db.get(ShiftSchedule, schedule_id).work_date
+        try:
+            settings = await self._bitable_settings_for_date(settings, work_date)
+        except Exception as exc:
+            with self._automation_db() as db:
+                for row in rows:
+                    db.get(ShiftHourDetail, row.id).bitable_status = f"failed: {str(exc)[:400]}"
+                parent = db.scalar(select(ShiftReport).where(ShiftReport.schedule_id == schedule_id))
+                if parent:
+                    parent.bitable_status = f"failed: {str(exc)[:400]}"
                 db.commit()
             return
         async with self._hour_sync_lock:
@@ -460,24 +473,8 @@ class ShiftHourlyAutomation:
             async with lock:
                 await self._sync_hourly_bitable_locked(schedule_id, settings, run_id)
 
-    async def _archive_hour_children(self, schedule_id: int, client: BitableClient,
-                                      settings: dict[str, str]) -> None:
-        scope = hashlib.sha256((settings["bitable_app_token"] + "\0" + settings["bitable_table_id"]).encode()).hexdigest()
-        with self._automation_db() as db:
-            rows = db.scalars(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id == schedule_id,
-                ShiftHourDetail.bitable_record_id != "")).all()
-        for row in rows:
-            if row.bitable_scope != scope:
-                raise RuntimeError("小时子记录属于其他多维表格配置，未删除父记录。")
-            await client.delete_record(row.bitable_record_id)
-            with self._automation_db() as db:
-                current = db.get(ShiftHourDetail, row.id)
-                current.bitable_record_id = ""
-                current.bitable_status = "archived: 小时明细保存在本地"
-                db.commit()
-
     async def _sync_hourly_bitable_locked(self, schedule_id: int, settings: dict[str, str], run_id: str) -> None:
-        scope = hashlib.sha256((settings["bitable_app_token"] + "\0" + settings["bitable_table_id"]).encode()).hexdigest()
+        scope = table_scope(settings)
         with self._automation_db() as db:
             schedule = db.get(ShiftSchedule, schedule_id)
             parent = db.scalar(select(ShiftReport).where(ShiftReport.schedule_id == schedule_id))
@@ -486,7 +483,7 @@ class ShiftHourlyAutomation:
                 .order_by(ShiftHourDetail.period_index)).all()
             if parent is None:
                 return
-            if schedule.work_date < self._automation_now().date().replace(day=1):
+            if schedule.work_date < hot_month_start(self._automation_now().date()):
                 for row in rows:
                     row.bitable_status = "local_only: 历史月份小时明细保存在本地"
                 db.commit()
@@ -505,20 +502,23 @@ class ShiftHourlyAutomation:
                 "time_range": f"{schedule.start_time:%H:%M}-{schedule.end_time:%H:%M}",
                 "duration_hours": sum((right-left).total_seconds() for left, right in shift_periods(schedule)) / 3600}
             parent_db_id = parent.id
+            db.commit()
         client = BitableClient(settings["feishu_app_id"], settings["feishu_app_secret"],
                                settings["bitable_app_token"], settings["bitable_table_id"])
         failures = []
         try:
             hierarchy = await client.ensure_hour_hierarchy(settings.get("bitable_parent_field", "父记录"),
                                                           settings.get("bitable_hourly_view_id", ""))
-            result = await client.upsert_record(values=parent_values, field_mapping=mapping, record_id=parent_id,
-                sync_key_field=settings.get("bitable_sync_key_field", "SourceID"), sync_key=f"shift-{schedule_id}",
-                lookup_sync_key=True)
+            parent_settings = {**settings, "_bitable_force": "false"} if settings.get("_bitable_parent_synced") == "true" else settings
+            result = await self._write_bitable_record(client, parent_settings, values=parent_values, field_mapping=mapping,
+                                                      sync_key=f"shift-{schedule_id}")
             parent_id = result["record_id"]
             with self._automation_db() as db:
                 state = db.get(ShiftHourState, schedule_id)
                 state.parent_record_id, state.bitable_scope = parent_id, scope
-                db.get(ShiftReport, parent_db_id).bitable_record_id = parent_id
+                parent_row = db.get(ShiftReport, parent_db_id)
+                parent_row.bitable_record_id = parent_id
+                parent_row.raw_json = {**parent_row.raw_json, "bitable_scope": table_scope(settings)}
                 db.commit()
             for row in rows:
                 left, right = local_datetime(row.start_at), local_datetime(row.end_at)
@@ -527,11 +527,9 @@ class ShiftHourlyAutomation:
                     "time_range": f"{left:%H:%M}-{right:%H:%M}", "duration_hours": (right-left).total_seconds()/3600,
                     "parent_record": [parent_id], "collection_status": row.status, "period_index": row.period_index}
                 try:
-                    result = await client.upsert_record(values=values,
+                    result = await self._write_bitable_record(client, settings, values=values,
                         field_mapping={**mapping, "parent_record": hierarchy["parent_field"]},
-                        record_id=row.bitable_record_id if row.bitable_scope == scope else "",
-                        sync_key_field=settings.get("bitable_sync_key_field", "SourceID"),
-                        sync_key=f"shift-{schedule_id}-hour-{row.period_index}-{HOURLY_VERSION}", lookup_sync_key=True)
+                        sync_key=f"shift-{schedule_id}-hour-{row.period_index}-{HOURLY_VERSION}")
                     with self._automation_db() as db:
                         current = db.get(ShiftHourDetail, row.id)
                         current.bitable_record_id, current.bitable_scope = result["record_id"], scope

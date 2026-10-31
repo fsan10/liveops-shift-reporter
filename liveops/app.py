@@ -4,7 +4,7 @@ import base64
 import hmac
 import json
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +34,7 @@ from liveops.models import (
     ShiftReport,
     ShiftSchedule,
 )
+from liveops.monthly import remember_manual_table
 from liveops.portal import schedule_end_datetime, shift_datetime
 from liveops.roster_import import MAX_FILE_BYTES, read_roster, roster_template
 from liveops.security import SecretBox
@@ -87,6 +88,12 @@ class ModulePatch(BaseModel):
 
 class SettingsInput(BaseModel):
     values: dict[str, str]
+
+
+class BitableRangeSyncInput(BaseModel):
+    date_start: date
+    date_end: date
+    mode: str = "incremental"
 
 
 class RunInput(BaseModel):
@@ -342,23 +349,46 @@ def _screenshot_history_json(row: ScreenshotRequest) -> dict[str, Any]:
     }
 
 
-def _run_history_page(db: Session, offset: int, size: int) -> tuple[list[dict[str, Any]], int]:
+def _run_history_page(
+    db: Session, offset: int, size: int, *, start_at: datetime | None = None,
+    end_at: datetime | None = None, time_field: str = "task", kinds: set[str] | None = None,
+    statuses: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
     """Merge actual runs and unexecuted terminal plans without duplicating shared captures."""
+    from liveops.portal import APP_TIMEZONE
     from liveops.sessions import local_datetime
 
-    unexecuted = (CollectionRun.id.is_(None), ScreenshotRequest.status.in_(["missed", "skipped", "failed"]))
-    total = (db.scalar(select(func.count(CollectionRun.id))) or 0) + (db.scalar(
+    run_time = CollectionRun.finished_at if time_field == "finished" else func.coalesce(CollectionRun.started_at, CollectionRun.created_at)
+    run_filters = [CollectionRun.finished_at.is_not(None)] if time_field == "finished" else []
+    plan_filters = [CollectionRun.id.is_(None), ScreenshotRequest.status.in_(["missed", "skipped", "failed"])]
+    if time_field == "finished":
+        plan_filters.append(False)  # Unexecuted plans have no completion time.
+    if kinds:
+        run_filters.append(CollectionRun.kind.in_(kinds))
+        targets = [target for target, kind in [("hourly", "hourly_screenshot_plan"), ("anchor", "anchor_screenshot_plan")] if kind in kinds]
+        plan_filters.append(ScreenshotRequest.target.in_(targets))
+    if statuses:
+        run_filters.append(CollectionRun.status.in_(statuses))
+        plan_filters.append(ScreenshotRequest.status.in_(statuses))
+    for value, is_start in [(start_at, True), (end_at, False)]:
+        if value is None:
+            continue
+        aware = value.replace(tzinfo=APP_TIMEZONE) if value.tzinfo is None else value
+        utc = aware.astimezone(timezone.utc).replace(tzinfo=None)
+        local = aware.astimezone(APP_TIMEZONE).replace(tzinfo=None)
+        run_filters.append(run_time >= utc if is_start else run_time <= utc)
+        plan_filters.append(ScreenshotRequest.planned_at >= local if is_start else ScreenshotRequest.planned_at <= local)
+    total = (db.scalar(select(func.count(CollectionRun.id)).where(*run_filters)) or 0) + (db.scalar(
         select(func.count(ScreenshotRequest.id)).outerjoin(
-            CollectionRun, CollectionRun.id == ScreenshotRequest.run_id).where(*unexecuted)) or 0)
+            CollectionRun, CollectionRun.id == ScreenshotRequest.run_id).where(*plan_filters)) or 0)
     if offset >= total:
         return [], total
     # Fetch only ordering metadata until pagination is resolved; raw responses stay out of this merge.
     count = offset + size
-    run_time = func.coalesce(CollectionRun.started_at, CollectionRun.created_at)
-    runs = db.execute(select(CollectionRun.id, run_time).order_by(
+    runs = db.execute(select(CollectionRun.id, run_time).where(*run_filters).order_by(
         run_time.desc(), CollectionRun.id.desc()).limit(count)).all()
     plans = db.execute(select(ScreenshotRequest.id, ScreenshotRequest.planned_at).outerjoin(
-        CollectionRun, CollectionRun.id == ScreenshotRequest.run_id).where(*unexecuted).order_by(
+        CollectionRun, CollectionRun.id == ScreenshotRequest.run_id).where(*plan_filters).order_by(
             ScreenshotRequest.planned_at.desc(), ScreenshotRequest.id.desc()).limit(count)).all()
     entries = [(datetime.fromisoformat(_utc_iso(at)), "run", key) for key, at in runs]
     entries.extend((local_datetime(at).astimezone(timezone.utc), "plan", key) for key, at in plans)
@@ -413,6 +443,7 @@ async def app_status(request: Request) -> dict[str, Any]:
     return {
         "ok": True,
         "second_precision_supported": True,
+        "features": {"report_date_range": True, "run_filters": True, "bitable_monthly": True},
         "timezone": os.getenv("APP_TIMEZONE", "Asia/Shanghai"),
         "browser_mode": settings.get("browser_mode", "cloak_cdp"),
         "browser_configured": bool(
@@ -941,8 +972,12 @@ async def run_collectors(payload: RunInput, request: Request) -> dict[str, Any]:
 
 @app.get("/api/reports")
 async def list_reports(
-    work_date: date | None = None, page: int = 1, page_size: int = 20
+    work_date: date | None = None, page: int = 1, page_size: int = 20,
+    date_start: date | None = None, date_end: date | None = None,
 ) -> dict[str, Any]:
+    left, right = date_start or date_end or work_date, date_end or date_start or work_date
+    if left and right and left > right:
+        raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期。")
     current_page = max(1, page)
     per_page = max(1, min(100, page_size))
     with _db() as db:
@@ -950,9 +985,9 @@ async def list_reports(
             ShiftReport.work_date.desc(), ShiftReport.start_time
         )
         count_statement = select(func.count(ShiftReport.id))
-        if work_date:
-            statement = statement.where(ShiftReport.work_date == work_date)
-            count_statement = count_statement.where(ShiftReport.work_date == work_date)
+        if left and right:
+            statement = statement.where(ShiftReport.work_date.between(left, right))
+            count_statement = count_statement.where(ShiftReport.work_date.between(left, right))
         total = db.scalar(count_statement) or 0
         rows = db.scalars(statement.offset((current_page - 1) * per_page).limit(per_page)).all()
         counts = dict(db.execute(select(ShiftHourDetail.schedule_id, func.count(ShiftHourDetail.id))
@@ -1001,13 +1036,28 @@ async def sync_report_hours(report_id: int, request: Request) -> dict[str, Any]:
 
 @app.get("/api/runs")
 async def list_runs(
-    page: int = 1, page_size: int | None = None, limit: int | None = None
+    page: int = 1, page_size: int | None = None, limit: int | None = None,
+    start_at: datetime | None = None, end_at: datetime | None = None,
+    time_field: str = "task", kinds: str = "", statuses: str = "",
 ) -> dict[str, Any]:
+    from liveops.sessions import local_datetime
+
+    known_kinds = {"report", "baseline", "interruption", "shift_hour", "hourly_sync", "bitable_sync",
+                   "hourly_screenshot", "hourly_watch", "screenshot_delivery",
+                   "hourly_screenshot_plan", "anchor_screenshot_plan"}
+    known_statuses = {"queued", "running", "succeeded", "partial", "failed", "missed", "skipped"}
+    selected_kinds = set(filter(None, kinds.split(",")))
+    selected_statuses = set(filter(None, statuses.split(",")))
+    if time_field not in {"task", "finished"} or selected_kinds - known_kinds or selected_statuses - known_statuses:
+        raise HTTPException(status_code=422, detail="任务时间、任务类型或状态筛选项无效。")
+    if start_at and end_at and local_datetime(start_at) > local_datetime(end_at):
+        raise HTTPException(status_code=422, detail="开始时间不能晚于结束时间。")
     current_page = max(1, page)
     requested_size = page_size if page_size is not None else limit if limit is not None else 20
     per_page = max(1, min(500, requested_size))
     with _db() as db:
-        items, total = _run_history_page(db, (current_page - 1) * per_page, per_page)
+        items, total = _run_history_page(db, (current_page - 1) * per_page, per_page,
+            start_at=start_at, end_at=end_at, time_field=time_field, kinds=selected_kinds, statuses=selected_statuses)
         return {
             "items": items,
             "total": total,
@@ -1079,63 +1129,97 @@ async def save_settings(payload: SettingsInput, request: Request) -> dict[str, A
     unknown = set(payload.values) - allowed
     if unknown:
         raise HTTPException(status_code=422, detail=f"未知设置项：{', '.join(sorted(unknown))}")
-    with _db() as db:
-        store = _store(request)
-        for key, value in payload.values.items():
-            if key in BOOLEAN_SETTINGS and value not in {"true", "false"}:
-                raise HTTPException(status_code=422, detail="功能开关只能是 true 或 false。")
-            if key == "hourly_message_template":
-                from string import Formatter
+    if {"bitable_table_month", "bitable_table_mode"}.intersection(payload.values):
+        raise HTTPException(status_code=422, detail="月表归属和模式由系统维护；修改 table_id 即可人工指定本月目标表。")
+    guard = (_dispatcher(request)._bitable_month_lock
+             if {"bitable_app_token", "bitable_table_id", "bitable_hourly_view_id"}.intersection(payload.values)
+             else nullcontext())
+    async with guard:
+        with _db() as db:
+            store = _store(request)
+            previous_bitable = {key: store.get(db, key) for key in ("bitable_app_token", "bitable_table_id")}
+            for key, value in payload.values.items():
+                if key in {"bitable_sync_key_field", "bitable_parent_field"} and not value.strip():
+                    raise HTTPException(status_code=422, detail="幂等键列名和父记录字段不能为空。")
+                if key == "bitable_field_mapping":
+                    try:
+                        mapping = json.loads(value)
+                        if not isinstance(mapping, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in mapping.items()):
+                            raise ValueError("invalid mapping")
+                    except (ValueError, TypeError) as exc:
+                        raise HTTPException(status_code=422, detail="字段映射必须是字段名对应列名的 JSON 对象。") from exc
+                if key in BOOLEAN_SETTINGS and value not in {"true", "false"}:
+                    raise HTTPException(status_code=422, detail="功能开关只能是 true 或 false。")
+                if key == "hourly_message_template":
+                    from string import Formatter
 
-                try:
-                    allowed_fields = {"hour_index", "shop_name", "live_room_id", "planned_time", "captured_time",
-                                      "host_name", "promoter", "start_time", "end_time", "duration_hours",
-                                      "gmv", "overall_amount", "overall_roi"}
-                    fields = {name for _, name, _, _ in Formatter().parse(value) if name}
-                    if not fields <= allowed_fields:
-                        raise ValueError("unknown hourly template field")
-                    value.format_map(dict.fromkeys(allowed_fields, 1))
-                except (ValueError, KeyError, IndexError, AttributeError) as exc:
-                    raise HTTPException(status_code=422, detail="每小时截图文案的变量或格式无效。") from exc
-            if key in SECRET_KEYS and not value.strip():
-                continue
-            if key == "browser_mode" and value not in {"cloak_cdp", "native"}:
-                raise HTTPException(
-                    status_code=422, detail="浏览器模式只能是 cloak_cdp 或 native。"
-                )
-            if key == "native_context_options":
-                try:
-                    parsed = json.loads(value)
-                    if not isinstance(parsed, dict):
-                        raise TypeError("must be object")
-                except (json.JSONDecodeError, TypeError) as exc:
+                    try:
+                        allowed_fields = {"hour_index", "shop_name", "live_room_id", "planned_time", "captured_time",
+                                          "host_name", "promoter", "start_time", "end_time", "duration_hours",
+                                          "gmv", "overall_amount", "overall_roi"}
+                        fields = {name for _, name, _, _ in Formatter().parse(value) if name}
+                        if not fields <= allowed_fields:
+                            raise ValueError("unknown hourly template field")
+                        value.format_map(dict.fromkeys(allowed_fields, 1))
+                    except (ValueError, KeyError, IndexError, AttributeError) as exc:
+                        raise HTTPException(status_code=422, detail="每小时截图文案的变量或格式无效。") from exc
+                if key in SECRET_KEYS and not value.strip():
+                    continue
+                if key == "browser_mode" and value not in {"cloak_cdp", "native"}:
                     raise HTTPException(
-                        status_code=422, detail="原生浏览器上下文选项必须是 JSON 对象。"
-                    ) from exc
-            if key in {"roster_anchor_pool", "roster_promoter_pool"}:
-                try:
-                    people = json.loads(value)
-                    if (
-                        not isinstance(people, list)
-                        or len(people) > 100
-                        or any(
-                            not isinstance(name, str)
-                            or not name.strip()
-                            or len(name.strip()) > 120
-                            or any(ord(char) < 32 for char in name)
-                            for name in people
-                        )
-                        or len({name.strip() for name in people}) != len(people)
-                    ):
-                        raise ValueError("invalid people list")
-                except (json.JSONDecodeError, ValueError, TypeError) as exc:
-                    raise HTTPException(
-                        status_code=422, detail="排班人员名单必须是无重复姓名的列表。"
-                    ) from exc
-                value = json.dumps([name.strip() for name in people], ensure_ascii=False)
-            store.set(db, key, value)
-        db.commit()
-        return {"settings": store.public(db), "saved": True}
+                        status_code=422, detail="浏览器模式只能是 cloak_cdp 或 native。"
+                    )
+                if key == "native_context_options":
+                    try:
+                        parsed = json.loads(value)
+                        if not isinstance(parsed, dict):
+                            raise TypeError("must be object")
+                    except (json.JSONDecodeError, TypeError) as exc:
+                        raise HTTPException(
+                            status_code=422, detail="原生浏览器上下文选项必须是 JSON 对象。"
+                        ) from exc
+                if key in {"roster_anchor_pool", "roster_promoter_pool"}:
+                    try:
+                        people = json.loads(value)
+                        if (
+                            not isinstance(people, list)
+                            or len(people) > 100
+                            or any(
+                                not isinstance(name, str)
+                                or not name.strip()
+                                or len(name.strip()) > 120
+                                or any(ord(char) < 32 for char in name)
+                                for name in people
+                            )
+                            or len({name.strip() for name in people}) != len(people)
+                        ):
+                            raise ValueError("invalid people list")
+                    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                        raise HTTPException(
+                            status_code=422, detail="排班人员名单必须是无重复姓名的列表。"
+                        ) from exc
+                    value = json.dumps([name.strip() for name in people], ensure_ascii=False)
+                store.set(db, key, value)
+            effective_values = dict(payload.values)
+            if ("bitable_app_token" in payload.values and "bitable_table_id" not in payload.values
+                    and payload.values["bitable_app_token"] != previous_bitable["bitable_app_token"]):
+                store.set(db, "bitable_table_id", "")
+                effective_values["bitable_table_id"] = ""
+            db.flush()
+            remember_manual_table(db, store, effective_values, now_local().date(), previous_bitable)
+            db.commit()
+            return {"settings": store.public(db), "saved": True}
+
+
+@app.post("/api/bitable/sync-range")
+async def sync_bitable_range(payload: BitableRangeSyncInput, request: Request) -> dict[str, Any]:
+    try:
+        run = await _dispatcher(request).begin_bitable_range_sync(payload.date_start, payload.date_end, payload.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"run": _run_json(run)}
 
 
 @app.post("/api/integrations/feishu/check")

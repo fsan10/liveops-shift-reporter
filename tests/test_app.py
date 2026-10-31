@@ -36,7 +36,7 @@ def test_schedule_ui_uses_roster_prototype_and_inline_controls(client):
     assert 'id="schedule-runs"' not in page
     assert 'id="all-runs"' not in page
     assert 'data-view="runs"' in page
-    assert 'id="roster-frame" src="/static/roster.html?v=20261022-roster-colors"' in page
+    assert 'id="roster-frame" src="/static/roster.html?v=20261031-roster-upload"' in page
     assert 'id="form-room"' not in page
     assert 'id="form-account"' not in page
     assert 'widgets.bundle.js' in page
@@ -610,7 +610,7 @@ def test_completed_shift_end_snapshot_becomes_next_shift_baseline(client, monkey
             db.commit()
 
 
-def test_monthly_bitable_archive_keeps_historical_report_in_sqlite(monkeypatch):
+def test_monthly_retention_never_deletes_unregistered_manual_table_records(monkeypatch):
     import asyncio
     from datetime import time, timedelta
 
@@ -679,14 +679,14 @@ def test_monthly_bitable_archive_keeps_historical_report_in_sqlite(monkeypatch):
     try:
         dispatcher = RunDispatcher(settings_store=None)
         archived, failed = asyncio.run(dispatcher._archive_cold_bitable_records(settings))
-        assert archived == 1
+        assert archived == 0
         assert failed == []
-        assert deleted_record_ids == ["rec-cold-month"]
+        assert deleted_record_ids == []
         with SessionLocal() as db:
             historical = db.get(ShiftReport, report_id)
             assert historical is not None
-            assert historical.bitable_record_id == ""
-            assert historical.bitable_status.startswith("archived:")
+            assert historical.bitable_record_id == "rec-cold-month"
+            assert historical.bitable_status == "synced"
     finally:
         with SessionLocal() as db:
             historical = db.get(ShiftReport, report_id)

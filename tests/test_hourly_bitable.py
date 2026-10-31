@@ -38,7 +38,7 @@ async def test_native_hierarchy_and_recovered_record_id_keep_children_under_one_
             else:
                 data={"items":views}
         elif "/views/" in path and method=="PATCH":
-            assert path.endswith("hour-view")
+            assert path.endswith("operator-view")
             assert body=={"property":{"hierarchy_config":{"field_id":"parent-link"}}}
         elif path.endswith("/records/search"):
             key=body["filter"]["conditions"][0]["value"][0]
@@ -76,7 +76,7 @@ async def test_native_hierarchy_and_recovered_record_id_keep_children_under_one_
     assert len(records)==2
     assert records[child["record_id"]]["fields"]["父记录"]==[parent["record_id"]]
     assert records[child["record_id"]]["fields"]["GMV"]==160
-    assert sum(method=="POST" and path.endswith("/views") for method,path,_ in log)==1
+    assert sum(method=="POST" and path.endswith("/views") for method,path,_ in log)==0
     assert sum(method=="POST" and path.endswith("/fields") for method,path,_ in log)==1
 
 
