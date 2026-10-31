@@ -262,6 +262,66 @@ async def test_missed_hour_is_missing_and_does_not_become_zero_or_merge_into_the
         assert row.metrics_json["gmv"] == 200
 
 
+@pytest.mark.parametrize("summary_enabled", [True, False])
+async def test_partial_final_hour_keeps_cumulative_baseline_for_next_host_after_restart(state, summary_enabled):
+    state.settings["data_collection_enabled"] = str(summary_enabled).lower()
+    first = add_schedule(state)
+    second = add_schedule(state, time(11, 30), time(14), "测试主播乙")
+    state.clock[0], state.counter[0] = at(11, 30), 900
+    dispatcher = service.RunDispatcher(None)
+    await dispatcher._check_due_schedules()
+    await drain(dispatcher)
+    with state.db() as db:
+        final = db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id == first,
+            ShiftHourDetail.period_index == 4))
+        assert final.status == "partial" and final.metrics_json["gmv"] is None
+        assert final.baseline_json["source"] == "hourly_previous_missing"
+        assert final.raw_json["end_baseline"]["counters"]["gmv"] == 900
+        assert final.raw_json["end_baseline"]["source_run_id"] == final.latest_run_id
+        summary = db.scalar(select(ShiftReport).where(ShiftReport.schedule_id == first))
+        assert summary.raw_json.get("is_final") == summary_enabled
+        if summary_enabled:
+            assert summary.metrics_json["gmv"] == 900
+    restarted = service.RunDispatcher(None)
+    restarted._recover_screenshot_requests()
+    state.clock[0], state.counter[0] = at(12, 30), 1200
+    await restarted._check_due_schedules()
+    await drain(restarted)
+    with state.db() as db:
+        first_hour = db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id == second,
+            ShiftHourDetail.period_index == 1))
+        assert first_hour.status == "succeeded"
+        assert first_hour.baseline_json["counters"]["gmv"] == 900
+        assert first_hour.metrics_json["gmv"] == 300
+        assert db.get(ShiftHourState, second).initial_baseline_json["chain"] == "shift_hourly"
+        if not summary_enabled:
+            assert service._current_baseline(db, db.get(ShiftSchedule, second))["source"] == "previous_shift_missing"
+
+
+async def test_failed_group_delivery_does_not_discard_valid_hour_end_baseline(state):
+    schedule_id = add_schedule(state)
+    state.failures["hourly-chat"] = RuntimeError("测试发送失败")
+    dispatcher = service.RunDispatcher(None)
+    await dispatcher._check_due_schedules()
+    await drain(dispatcher)
+    with state.db() as db:
+        first = db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id == schedule_id,
+            ShiftHourDetail.period_index == 1))
+        assert db.get(CollectionRun, first.latest_run_id).status == "partial"
+        assert first.raw_json["end_baseline"]["counters"]["gmv"] == 100
+    state.failures.clear()
+    state.clock[0], state.counter[0] = at(9), 250
+    restarted = service.RunDispatcher(None)
+    restarted._recover_screenshot_requests()
+    await restarted._check_due_schedules()
+    await drain(restarted)
+    with state.db() as db:
+        second = db.scalar(select(ShiftHourDetail).where(ShiftHourDetail.schedule_id == schedule_id,
+            ShiftHourDetail.period_index == 2))
+        assert second.baseline_json["counters"]["gmv"] == 100
+        assert second.metrics_json["gmv"] == 150
+
+
 async def test_restart_does_not_recapture_completed_hour(state):
     add_schedule(state)
     first = service.RunDispatcher(None)

@@ -141,3 +141,49 @@ def test_unexecuted_hour_plans_do_not_prevent_schedule_deletion(api_client):
         service.RunDispatcher(None)._ensure_hour_plan(db,row)
         db.commit()
     assert api_client.delete(f"/api/schedules/{schedule_id}").status_code==200
+
+
+def test_run_history_includes_missed_plans_in_local_time_without_duplicate_executions(api_client):
+    from datetime import datetime, timezone
+    from urllib.parse import quote
+
+    from liveops.models import CollectionRun, ScreenshotRequest
+    from liveops.portal import APP_TIMEZONE
+
+    def local(hour):
+        return datetime(2098, 3, 15, hour, tzinfo=APP_TIMEZONE)
+
+    with service.SessionLocal() as db:
+        for key, hour in [("captured-22", 22), ("captured-19", 19)]:
+            db.add(CollectionRun(id=key, kind="report", trigger="scheduler", status="succeeded",
+                created_at=local(hour).astimezone(timezone.utc), started_at=local(hour).astimezone(timezone.utc)))
+        db.flush()
+        for key, hour, status, run_id in [
+            ("shift-hour:1:21:+08:00", 21, "missed", None),
+            ("missed-20", 20, "missed", None),
+            ("shared-22", 22, "captured", "captured-22"),
+            ("pending-23", 23, "pending", None),
+            ("skipped-18", 18, "skipped", None),
+        ]:
+            db.add(ScreenshotRequest(id=key, target="hourly", planned_at=local(hour), status=status,
+                run_id=run_id, created_at=local(23).astimezone(timezone.utc),
+                delivery_json={"reason": "未执行的计划"}))
+        db.commit()
+    pages = [api_client.get(f"/api/runs?page={page}&page_size=2").json() for page in (1, 2, 3)]
+    assert all(page["total"] == 5 for page in pages)
+    rows = [row for page in pages for row in page["items"]]
+    assert [row["id"] for row in rows] == ["captured-22", "screenshot-request:shift-hour:1:21:+08:00",
+        "screenshot-request:missed-20", "captured-19", "screenshot-request:skipped-18"]
+    assert api_client.get("/api/runs?limit=6").json()["items"] == rows
+    missed = rows[1]
+    assert missed["status"] == "missed" and missed["entry_type"] == "screenshot_request"
+    assert missed["planned_at"] == local(21).isoformat()
+    assert missed["started_at"] is None and missed["finished_at"] is None
+    assert missed["result"]["executed"] is False
+    detail = api_client.get("/api/runs/" + quote(missed["id"], safe=""))
+    assert detail.status_code == 200 and detail.json()["item"] == missed
+    assert api_client.get("/api/runs/screenshot-request:missing").status_code == 404
+    assert api_client.get("/api/runs/screenshot-request:shared-22").status_code == 404
+    assert api_client.get("/api/runs/screenshot-request:pending-23").status_code == 404
+    assert api_client.get("/api/runs?page=4&page_size=2").json()["items"] == []
+    assert api_client.get("/api/status").json()["running_count"] == 0

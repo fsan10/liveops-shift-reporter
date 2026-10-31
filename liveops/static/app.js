@@ -8,6 +8,7 @@ const state = { view: "overview", date: new Date().toLocaleDateString("en-CA"), 
 const renderedHtml = new WeakMap();
 const expandedHourReports = new Set(), hourDetailCache = new Map();
 let settingsSchema = null;
+let automationStatus = null, queueCaptionIndex = 0;
 let openDatePicker = null;
 let serviceChipText = "本地服务已运行";
 let rosterChipText = "";
@@ -51,7 +52,8 @@ function missingLabels(items) {
 }
 function stamp(value) { if (!value) return "—"; const iso = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`; return new Date(iso).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }); }
 function dateLabel(value) { return value ? value.replaceAll("-", ".") : ""; }
-function runLabel(run) { return ({ baseline: "千川累计基线", interruption: "中断片段采集", shift_hour: "主播小时明细", hourly_sync: "小时明细同步", hourly_screenshot: "历史小时截图", hourly_watch: "直播状态检查", screenshot_delivery: "截图补发" })[run.kind] || "主播排班任务"; }
+function runLabel(run) { return ({ baseline: "千川累计基线", interruption: "中断片段采集", shift_hour: "主播小时明细", hourly_sync: "小时明细同步", hourly_screenshot: "历史小时截图", hourly_screenshot_plan: "每小时截图", anchor_screenshot_plan: "主播时段截图", hourly_watch: "直播状态检查", screenshot_delivery: "截图补发" })[run.kind] || "主播排班任务"; }
+function runTime(run) { return run.planned_at || run.started_at || run.created_at; }
 function renderHTML(node, html) { if (renderedHtml.get(node) === html) return; renderedHtml.set(node, html); node.innerHTML = html; }
 function toast(message, error = false) {
   const node = $("#toast"); node.textContent = message; node.style.background = error ? "#b83f4d" : "#18243a"; node.classList.add("show");
@@ -67,6 +69,7 @@ function setView(view) {
   const titles = { overview: "数据总览", schedules: "排班管理", reports: "数据明细", runs: "采集记录", collectors: "采集脚本", settings: "系统配置" };
   $("#page-title").textContent = titles[view] || "数据总览";
   chipIndex = 0; renderConnectionChip();
+  if (view === "overview") loadDashboard().catch(showError);
   if (view === "collectors") loadCollectors().catch(showError);
   if (view === "settings") loadSettings().catch(showError);
   if (view === "reports") loadReportView().catch(showError);
@@ -91,7 +94,7 @@ function syncStatusDetail(status, integration) {
   return "";
 }
 function statusLabel(status, integration = "") {
-  const text = { succeeded: "完成", partial: "部分完成", failed: "失败", queued: "队列中", running: "执行中", pending: "待同步", sent: "已发送", synced: "已同步", archived: "仅本地保留", local_only: "仅本地保留", not_configured: "未配置" };
+  const text = { succeeded: "完成", partial: "部分完成", failed: "失败", missed: "已漏拍", skipped: "已跳过", queued: "队列中", running: "执行中", pending: "待同步", sent: "已发送", synced: "已同步", archived: "仅本地保留", local_only: "仅本地保留", not_configured: "未配置" };
   const key = String(status || "").split(":", 1)[0];
   const detail = syncStatusDetail(status, integration) || String(status || "");
   return `<span class="run-state state-${esc(key)}"${detail ? ` title="${esc(detail)}"` : ""}>${esc(text[key] || status || "—")}</span>`;
@@ -175,7 +178,7 @@ function renderChart(series = []) {
 function renderRuns(runs, target) {
   const rows = runs.slice(0, 6);
   if (!rows.length) { renderHTML(target, empty("暂无运行记录")); return; }
-  renderHTML(target, rows.map(run => `<button class="run-item run-button" data-run-id="${esc(run.id)}" aria-label="查看${esc(runLabel(run))}详情"><span class="run-icon">▣</span><span class="run-copy"><span class="run-name">${esc(runLabel(run))}</span><span class="run-time">${esc(stamp(run.started_at || run.created_at))} · ${esc(run.trigger === "scheduler" ? "自动执行" : "人工执行")}</span></span><span class="run-status">${statusLabel(run.status)}</span></button>`).join(""));
+  renderHTML(target, rows.map(run => `<button class="run-item run-button" data-run-id="${esc(run.id)}" aria-label="查看${esc(runLabel(run))}详情"><span class="run-icon">▣</span><span class="run-copy"><span class="run-name">${esc(runLabel(run))}</span><span class="run-time">${esc(stamp(runTime(run)))} · ${esc(run.entry_type === "screenshot_request" ? "计划时点" : run.trigger === "scheduler" ? "自动执行" : "人工执行")}</span></span><span class="run-status">${statusLabel(run.status)}</span></button>`).join(""));
 }
 function scheduleTable(items) {
   if (!items.length) return empty("该日期还没有排班。进入排班管理，在日期卡片中添加班次。");
@@ -208,7 +211,7 @@ function reportTable(items) {
   return `<table class="data-table"><thead><tr><th>小时明细</th>${visible.map(col => `<th>${esc(col.label)}</th>`).join("")}<th>截图</th><th>同步状态</th><th>详情</th></tr></thead><tbody>${items.map(row => {
     const opened = expandedHourReports.has(row.id), hasHours = row.hour_count > 0;
     const cells = visible.map(col => `<td>${esc(reportFieldValue(row, col))}</td>`).join("");
-    return `<tr data-hour-row="${row.id}" class="shift-summary-row"><td>${hasHours ? `<button class="hour-toggle" data-hour-toggle="${row.id}" aria-expanded="${opened}" aria-controls="hour-drawer-${row.id}" aria-label="${opened ? "收起" : "展开"}${esc(row.host_name)}小时明细"><span class="hour-chevron ${opened ? "is-open" : ""}">›</span>${row.hour_count} 段</button>` : "—"}</td>${cells}<td>${(row.screenshots || []).length} 张</td><td>${row.summary_pending ? '<span class="pill">主播汇总待结算</span>' : ""}${statusLabel(row.feishu_status, "feishu")} ${statusLabel(row.bitable_status, "bitable")}</td><td><button class="small-button" data-report-id="${row.id}">查看汇总</button></td></tr>${hasHours ? `<tr class="hour-drawer-row"><td colspan="${visible.length + 4}"><div id="hour-drawer-${row.id}" class="hour-drawer ${opened ? "is-open" : ""}" aria-hidden="${!opened}" ${opened ? "" : "inert"}><div class="hour-drawer-clip"><div class="hour-drawer-content">${hourDetailTable(row, visible)}</div></div></div></td></tr>` : ""}`;
+    return `<tr data-hour-row="${row.id}" class="shift-summary-row"><td>${hasHours ? `<button class="hour-toggle" data-hour-toggle="${row.id}" aria-expanded="${opened}" aria-controls="hour-drawer-${row.id}" aria-label="${opened ? "收起" : "展开"}${esc(row.host_name)}小时明细"><svg class="hour-chevron ${opened ? "is-open" : ""}" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>${row.hour_count} 段</button>` : "—"}</td>${cells}<td>${(row.screenshots || []).length} 张</td><td>${row.summary_pending ? '<span class="pill">主播汇总待结算</span>' : ""}${statusLabel(row.feishu_status, "feishu")} ${statusLabel(row.bitable_status, "bitable")}</td><td><button class="small-button" data-report-id="${row.id}">查看汇总</button></td></tr>${hasHours ? `<tr class="hour-drawer-row"><td colspan="${visible.length + 4}"><div id="hour-drawer-${row.id}" class="hour-drawer ${opened ? "is-open" : ""}" aria-hidden="${!opened}" ${opened ? "" : "inert"}><div class="hour-drawer-clip"><div class="hour-drawer-content">${hourDetailTable(row, visible)}</div></div></div></td></tr>` : ""}`;
   }).join("")}</tbody></table>`;
 }
 function hourDetailTable(parent, columns) {
@@ -219,7 +222,7 @@ function hourDetailTable(parent, columns) {
     const time = value => new Date(value).toLocaleTimeString("zh-CN", {timeZone:"Asia/Shanghai",hour:"2-digit",minute:"2-digit",hour12:false});
     const item = { ...parent, metrics: row.metrics, start_time: time(row.start_at), end_time: time(row.end_at) };
     const baseline = row.baseline?.source === "first_shift_zero" ? 0 : row.baseline?.counters?.gmv;
-    return `<tr><td>第 ${row.period_index} 段<br><span class="panel-note">${esc(labels[row.status] || row.status)}</span></td>${columns.map(col => `<td>${esc(reportFieldValue(item, col))}</td>`).join("")}<td>${money(baseline)} → ${money(row.end_baseline?.counters?.gmv)}</td><td>${statusLabel(row.bitable_status,"bitable")}</td><td>${row.latest_run_id ? `<button class="small-button" data-run-id="${esc(row.latest_run_id)}">查看</button>` : "—"}${row.missing_fields?.length ? `<span class="hour-missing" title="${esc(row.missing_fields.join('；'))}">存在缺失</span>` : ""}</td></tr>`;
+    return `<tr><td>第 ${row.period_index} 段<br><span class="panel-note">${esc(labels[row.status] || row.status)}</span></td>${columns.map(col => `<td>${esc(reportFieldValue(item, col))}</td>`).join("")}<td>${money(baseline)} → ${money(row.end_baseline?.counters?.gmv)}${row.latest_run_id ? `<small class="hour-baseline-note">${row.end_baseline ? "结束累计快照已保存" : "未取得有效结束快照"}</small>` : ""}</td><td>${statusLabel(row.bitable_status,"bitable")}</td><td>${row.latest_run_id ? `<button class="small-button" data-run-id="${esc(row.latest_run_id)}">查看</button>` : "—"}${row.missing_fields?.length ? `<span class="hour-missing" title="${esc(row.missing_fields.join('；'))}">存在缺失</span>` : ""}</td></tr>`;
   }).join("")}</tbody></table></div>`;
 }
 async function toggleHourDetails(id) {
@@ -238,7 +241,7 @@ async function toggleHourDetails(id) {
 }
 function runsTable(items) {
   if (!items.length) return empty("暂无运行记录。");
-  return `<table class="data-table"><thead><tr><th>开始时间</th><th>完成时间</th><th>任务</th><th>来源</th><th>状态</th><th>说明</th><th>详情</th></tr></thead><tbody>${items.map(run => `<tr><td>${esc(stamp(run.started_at || run.created_at))}</td><td>${esc(stamp(run.finished_at))}</td><td>${esc(runLabel(run))}</td><td>${run.trigger === "scheduler" ? "自动调度" : "人工触发"}</td><td>${statusLabel(run.status)}</td><td>${esc(run.message || (run.missing_fields || []).join("、") || "—")}</td><td><button class="small-button" data-run-id="${esc(run.id)}">查看</button></td></tr>`).join("")}</tbody></table>`;
+  return `<table class="data-table"><thead><tr><th>任务时间</th><th>完成时间</th><th>任务</th><th>来源</th><th>状态</th><th>说明</th><th>详情</th></tr></thead><tbody>${items.map(run => `<tr><td>${esc(stamp(runTime(run)))}${run.entry_type === "screenshot_request" ? '<br><span class="panel-note">计划时点 · 未执行</span>' : ""}</td><td>${esc(stamp(run.finished_at))}</td><td>${esc(runLabel(run))}</td><td>${run.trigger === "scheduler" ? "自动调度" : "人工触发"}</td><td>${statusLabel(run.status)}</td><td>${esc(run.message || (run.missing_fields || []).join("、") || "—")}</td><td><button class="small-button" data-run-id="${esc(run.id)}">查看</button></td></tr>`).join("")}</tbody></table>`;
 }
 async function loadStatus() {
   const result = await api("/api/status");
@@ -248,8 +251,9 @@ async function loadStatus() {
   $("#shop-name").textContent = state.settings.shop_name || "店铺未配置";
 }
 async function loadDashboard() {
-  const [data, scheduleData, runs] = await Promise.all([api(`/api/dashboard?work_date=${state.date}`), api(`/api/schedules?work_date=${state.date}`), api("/api/runs?limit=15")]);
+  const [data, scheduleData, runs, automation] = await Promise.all([api(`/api/dashboard?work_date=${state.date}`), api(`/api/schedules?work_date=${state.date}`), api("/api/runs?limit=15"), api("/api/automation/status")]);
   state.schedules = scheduleData.items || []; state.runs = runs.items || [];
+  automationStatus = automation; renderQueueCaption();
   renderKpis(data); renderChart(data.series || []); renderRuns(state.runs, $("#recent-runs"));
   renderHTML($("#overview-schedules"), scheduleTable(state.schedules));
 }
@@ -288,7 +292,6 @@ async function refreshVisibleView() {
   if (state.view === "schedules") { document.getElementById("roster-frame")?.contentWindow?.postMessage({ type: "liveops:roster-refresh" }, location.origin); return; }
   if (state.view === "reports") return loadReportView();
   if (state.view === "runs") return loadRunsView();
-  if (state.view === "settings") return loadAutomationStatus();
 }
 async function refreshAll() {
   if (state.refreshing) return;
@@ -321,12 +324,13 @@ async function showReport(id) {
 }
 async function showRun(id) {
   try {
-    const { item } = await api(`/api/runs/${encodeURIComponent(id)}`); $("#detail-title").textContent = `${item.kind === "baseline" ? "千川累计基线" : "采集运行"} · ${String(item.status).toUpperCase()}`;
+    const { item } = await api(`/api/runs/${encodeURIComponent(id)}`); $("#detail-title").textContent = `${runLabel(item)} · ${String(item.status).toUpperCase()}`;
     const steps = (item.result?.steps || []).map((step, index) => `<li class="step-item step-${esc(step.status || "info")}"><span class="step-index">${index + 1}</span><div><time>${esc(stamp(step.at))}</time><strong>${esc(step.stage)}</strong><p>${esc(step.description)}</p></div></li>`).join("");
     const result = { ...(item.result || {}) }; delete result.steps;
     const deliveries = (result.screenshot_deliveries || []).map(row => `<div class="sync-status-item"><strong>${esc(row.target === "hourly" ? "业务每小时群" : "主播群")}</strong><span>${esc(({ sent: "已发送", failed: "发送失败", uncertain: "发送结果待确认，请先核实群内消息", not_configured: "未配置", pending: "等待发送", sending: "发送中" })[row.status] || row.status || row.capture_status)}</span><pre>${esc(row.error || row.message_id || "")}</pre></div>`).join("");
     const images = (result.screenshots || []).map(shot => `<a class="screenshot-card" href="/artifacts/${esc(shot.relative_path)}" target="_blank" rel="noreferrer"><img src="/artifacts/${esc(shot.relative_path)}" alt="${esc(shot.name)}"><span>${esc(shot.name)}</span></a>`).join("");
-    renderHTML($("#detail-content"), `<div class="detail-block"><h4>开始与完成</h4><pre>开始：${esc(stamp(item.started_at || item.created_at))}\n完成：${esc(stamp(item.finished_at))}</pre></div><div class="detail-block"><h4>逐步运行日志</h4><ol class="step-list">${steps || "暂无步骤日志"}</ol></div><div class="detail-block"><h4>运行说明</h4><pre>${esc(item.message || "任务正在执行…")}</pre></div><div class="detail-block"><h4>缺失字段</h4><pre>${esc(missingLabels(item.missing_fields))}</pre></div><details class="detail-block"><summary>结果数据</summary><pre>${esc(JSON.stringify(result, null, 2))}</pre></details>`);
+    const timing = item.entry_type === "screenshot_request" ? `计划：${stamp(item.planned_at)}\n状态记录于：${stamp(item.created_at)}\n未执行，没有实际开始与完成时间。` : `开始：${stamp(item.started_at || item.created_at)}\n完成：${stamp(item.finished_at)}`;
+    renderHTML($("#detail-content"), `<div class="detail-block"><h4>任务时间</h4><pre>${esc(timing)}</pre></div><div class="detail-block"><h4>逐步运行日志</h4><ol class="step-list">${steps || (item.entry_type === "screenshot_request" ? "计划未执行，未产生采集日志。" : "暂无步骤日志")}</ol></div><div class="detail-block"><h4>运行说明</h4><pre>${esc(item.message || "任务正在执行…")}</pre></div><div class="detail-block"><h4>缺失字段</h4><pre>${esc(missingLabels(item.missing_fields))}</pre></div><details class="detail-block"><summary>结果数据</summary><pre>${esc(JSON.stringify(result, null, 2))}</pre></details>`);
     if (deliveries) $("#detail-content").insertAdjacentHTML("afterbegin", `<div class="detail-block"><h4>截图发送结果</h4><div class="sync-status-list">${deliveries}</div>${(result.screenshot_deliveries || []).some(row => row.capture_status === "captured" && ["failed", "not_configured"].includes(row.status)) ? `<button class="button button-secondary" data-retry-screenshots="${esc(item.id)}">仅补发未成功的群</button>` : ""}</div>`);
     if (images) $("#detail-content").insertAdjacentHTML("beforeend", `<div class="detail-block"><h4>本次截图</h4><div class="screenshot-grid">${images}</div></div>`);
     $("#detail-content").scrollTop = 0;
@@ -437,13 +441,17 @@ async function loadSettings() {
   $("#feishu_app_secret").placeholder = settings.feishu_app_secret_configured ? settings.feishu_app_secret_masked : "未配置";
   $("#secret-configured").textContent = settings.feishu_app_secret_configured ? `App Secret 已加密保存：${settings.feishu_app_secret_masked}；留空会继续使用已保存的密钥。` : "尚未配置 App Secret。";
   $("#feishu-state").textContent = settings.feishu_app_secret_configured ? "密钥已保存" : "未配置";
-  await loadAutomationStatus();
 }
-async function loadAutomationStatus() {
-  const result = await api("/api/automation/status");
-  $("#automation-clock").textContent = !result.hourly_enabled ? "每小时截图已关闭" : result.observation_failed ? "直播状态检查失败，每小时截图已暂停；请查看采集记录。" : result.next_hourly_at ? `下次小时截图：${stamp(result.next_hourly_at)} · ${result.next_host_name || ""} ${result.next_period || ""}` : "等待当天启用的主播排班；按排班时段采集。";
-  $("#automation-recent").innerHTML = (result.recent_requests || []).slice(0, 5).map(item => `<div><span>${esc(item.target === "hourly" ? "每小时截图" : "主播时段截图")} · ${esc(stamp(item.planned_at))}</span><span>${esc(({ pending: "等待执行", capturing: "截图中", captured: "已截图", missed: "已漏拍", failed: "截图失败", skipped: "已跳过" })[item.status] || item.status)}${item.status === "captured" ? ` · ${esc(({ sent: "已发送", failed: "发送失败", uncertain: "发送待确认", not_configured: "群未配置", pending: "等待发送", sending: "发送中" })[item.delivery_status] || item.delivery_status)}` : ""}</span></div>`).join("");
+function renderQueueCaption() {
+  const node = $("#queue-caption"), result = automationStatus;
+  if (!node) return;
+  const next = !result ? "正在读取下次小时任务…" : !result.hourly_enabled ? "每小时截图已关闭" : result.observation_failed ? "小时任务状态检查失败，请查看采集记录。" : result.next_hourly_at ? `下次小时截图：${stamp(result.next_hourly_at)} · ${result.next_host_name || ""} ${result.next_period || ""}` : "等待当天启用的主播排班；按排班时段采集。";
+  const messages = ["最近的自动采集与人工执行", next];
+  node.textContent = messages[queueCaptionIndex];
+  node.title = messages.join("\n");
+  node.dataset.slide = String(queueCaptionIndex);
 }
+setInterval(() => { if (state.view === "overview" && !document.hidden && !$("#queue-caption")?.matches(":hover")) { queueCaptionIndex = 1 - queueCaptionIndex; renderQueueCaption(); } }, 6500);
 async function saveSettings() {
   if (!settingsSchema) { toast("配置尚未加载，请稍后重试", true); return; }
   const current = {};

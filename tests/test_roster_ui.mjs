@@ -6,7 +6,7 @@ import vm from 'node:vm';
 // Exercise the actual roster script with an empty/partial browser draft and a fixed Shanghai day.
 const source = readFileSync(new URL('../liveops/static/roster.html', import.meta.url), 'utf8');
 const script = source.match(/<script>([\s\S]*?)<\/script>/)[1];
-async function roster(storage = new Map()) {
+async function roster(storage = new Map(), importResponse = null) {
   const nodes = new Map(), requests = [], scrolls = [], frames = [];
   const node = key => {
     if (!nodes.has(key)) {
@@ -38,6 +38,7 @@ async function roster(storage = new Map()) {
   }
   const context = vm.createContext({
     Date: Clock, console, setTimeout() {}, clearTimeout() {},
+    FormData: class { append() {} },
     ResizeObserver: class { observe() {} },
     requestAnimationFrame(callback) { frames.push(callback); },
     document: {
@@ -48,7 +49,8 @@ async function roster(storage = new Map()) {
     location: { origin: 'http://localhost' },
     localStorage: { getItem(key) { return storage.get(key); }, setItem(key, value) { storage.set(key, value); }, removeItem(key) { storage.delete(key); } },
     fetch: async (path, options = {}) => {
-      requests.push({ path, method: options.method || 'GET', body: options.body && JSON.parse(options.body) });
+      requests.push({ path, method: options.method || 'GET', body: typeof options.body === 'string' ? JSON.parse(options.body) : options.body });
+      if (path.startsWith('/api/schedules/import?') && importResponse) return importResponse(path);
       return { ok: true, json: async () => path === '/api/settings' ? { settings: {} }
         : options.method === 'POST' ? { item: { id: 100 } } : { items: [], days: {} } };
     },
@@ -62,6 +64,7 @@ async function roster(storage = new Map()) {
       shiftDates, interruptButtonHTML, isPastDay, emptyMonth, renderList, renderWeek,
       addShift, openCurrentRoster, focusToday, loadRemote, openShiftMenu, openShiftSubmenu, setCalendarShiftField,
       colorOf, ensurePersonColors, renderAll, applyPeople,
+      renderImportResult, submitRosterImport, resetImportPreview,
       setData(value) { data=value;serverData=emptyMonth(currentMonth); },
       getData() { return data; },
       setMonth(value) { currentMonth=value; },
@@ -72,6 +75,54 @@ async function roster(storage = new Map()) {
   await new Promise(resolve => setImmediate(resolve));
   return { ...context.rosterTest, node, storage, requests, scrolls, frames };
 }
+
+const importResult = (changes = {}) => ({
+  valid: true, imported: false, counts: { new: 1, duplicate: 0, historical: 0, error: 0 },
+  schedule_count: 1, note_count: 0,
+  rows: [{ row: 2, work_date: '2026-10-09', time: '07:00-10:00', host_name: '<script>bad</script>',
+    promoter: '', rest: '', shoot: '', status: 'new', message: '新增班次' }], ...changes,
+});
+
+test('import preview escapes spreadsheet cells and blocks confirmation on invalid or unchanged files', async () => {
+  const ui = await roster();
+  ui.renderImportResult(importResult());
+  assert.equal(ui.node('importConfirm').disabled, false);
+  assert.match(ui.node('importResult').innerHTML, /&lt;script&gt;bad&lt;\/script&gt;/);
+  assert.doesNotMatch(ui.node('importResult').innerHTML, /<script>/);
+  ui.renderImportResult(importResult({ valid: false, counts: { new: 1, error: 1, duplicate: 0, historical: 0 } }));
+  assert.equal(ui.node('importConfirm').disabled, true);
+  assert.match(ui.node('importSummary').textContent, /本批次未写入/);
+  ui.renderImportResult(importResult({ counts: { new: 0, error: 0, duplicate: 1, historical: 0 } }));
+  assert.equal(ui.node('importConfirm').disabled, true);
+});
+
+test('file must pass preview before committing and changing it invalidates confirmation', async () => {
+  const ui = await roster(new Map(), async () => ({ ok: true, json: async () => importResult() }));
+  ui.node('importFile').files = [{ name: 'roster.xlsx', size: 100 }];
+  await ui.submitRosterImport(false);
+  assert.equal(ui.requests.filter(request => request.path.startsWith('/api/schedules/import?')).length, 0);
+  await ui.submitRosterImport(true);
+  assert.equal(ui.node('importConfirm').disabled, false);
+  assert.equal(ui.requests.at(-1).path, '/api/schedules/import?preview=true');
+  ui.node('importFile').dispatch('change', {});
+  assert.equal(ui.node('importConfirm').disabled, true);
+  await ui.submitRosterImport(false);
+  assert.equal(ui.requests.filter(request => request.path.includes('preview=false')).length, 0);
+});
+
+test('confirm revalidation errors stay visible and disable further confirmation', async () => {
+  const ui = await roster(new Map(), async path => ({
+    ok: path.includes('preview=true'), status: 409,
+    json: async () => path.includes('preview=true') ? importResult() : importResult({ valid: false,
+      counts: { new: 0, error: 1, duplicate: 0, historical: 0 } }),
+  }));
+  ui.node('importFile').files = [{ name: 'roster.xlsx', size: 100 }];
+  await ui.submitRosterImport(true);
+  await ui.submitRosterImport(false);
+  assert.match(ui.node('importSummary').textContent, /本批次未写入/);
+  assert.equal(ui.node('importConfirm').disabled, true);
+  assert.equal(ui.node('importPreview').disabled, false);
+});
 
 test('roster restores the multicolor palette in list, calendar, sidebar and person menu', async () => {
   const ui = await roster(), data = ui.emptyMonth('2026-10');

@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0b1220">
   <title>直播运营数据台</title>
   <link rel="stylesheet" href="/static/style.css">
-  <link rel="stylesheet" href="/static/automation.css">
+  <link rel="stylesheet" href="/static/automation.css?v=20261030-queue-history">
 </head>
 <body>
   <div class="app-shell">
@@ -35,7 +35,7 @@
         <div class="kpi-grid" id="kpi-grid"></div>
         <div class="content-grid overview-grid">
           <article class="panel chart-panel"><div class="panel-heading"><div><h3>时段成交表现</h3><p>GMV 与整体成交额 · 元</p></div><span class="panel-note" id="chart-date"></span></div><div id="sales-chart" class="chart-wrap"></div></article>
-          <article class="panel"><div class="panel-heading"><div><h3>采集队列</h3><p>最近的自动采集与人工执行</p></div><button class="text-button" data-nav="runs">查看全部 ↗</button></div><div id="recent-runs" class="run-list"></div></article>
+          <article class="panel"><div class="panel-heading"><div><h3>采集队列</h3><p id="queue-caption" class="queue-caption" aria-live="off">最近的自动采集与人工执行</p></div><button class="text-button" data-nav="runs">查看全部 ↗</button></div><div id="recent-runs" class="run-list"></div></article>
         </div>
         <article class="panel table-panel"><div class="panel-heading"><div><h3>今日排班</h3><p>主播时段、基线和采集状态</p></div><button class="text-button" data-nav="schedules">排班管理 ↗</button></div><div id="overview-schedules" class="table-scroll"></div></article>
       </section>
@@ -50,7 +50,7 @@
       </section>
 
       <section class="view" id="view-runs">
-        <div class="page-intro"><div><h2>采集记录</h2><p>查看每次自动采集、人工执行和基线任务的状态及详情。</p></div></div>
+        <div class="page-intro"><div><h2>采集记录</h2><p>查看自动采集、人工执行、基线任务和漏拍计划的状态及详情。</p></div></div>
         <article class="panel table-panel"><div class="panel-heading"><div><h3>采集运行记录</h3><p>点击记录查看执行结果、缺失字段和错误原因。</p></div><span class="panel-note" id="run-count"></span></div><div id="runs-table" class="table-scroll"></div><div id="runs-pagination" class="pagination-wrap"></div></article>
       </section>
 
@@ -95,7 +95,6 @@
               <label class="automation-switch"><span><strong>主播时段截图</strong><small>按排班结束时间截图并发送主播群；关闭不影响数据采集。</small></span><input id="anchor_screenshot_enabled" type="checkbox" role="switch"></label>
             </div>
             <label>时区<input id="timezone-display" value="Asia/Shanghai" readonly></label><label>结束后等待（秒）<input id="settle_delay_seconds" type="number" min="0" max="3600"></label><label>错过时间后的补采窗口（分钟）<input id="auto_catchup_minutes" type="number" min="0" max="1440"></label>
-            <p id="automation-clock" class="field-help" aria-live="polite"></p><div id="automation-recent" class="automation-recent"></div>
             <div class="notice notice-green"><strong>按排班分段，共用末段截图</strong><span>剩余不足 2 小时合并到班次结束，例如 07:00–11:30 分为 07–08、08–09、09–10、10–11:30。末段与主播任务共用一次采集和截图，两套基线分别计算，各自发送对应群。</span></div>
           </article>
         </div>
@@ -106,7 +105,7 @@
   <dialog id="detail-dialog" class="modal modal-wide"><div class="modal-heading"><div><span class="eyebrow">COLLECTION DETAIL</span><h2 id="detail-title">采集详情</h2></div><button type="button" class="icon-button" data-close-dialog aria-label="关闭">×</button></div><div id="detail-content" class="detail-content"></div></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/static/settings-form.js?v=20261030-settings-compat" defer></script>
-  <script src="/static/app.js?v=20261030-settings-compat" defer></script>
+  <script src="/static/app.js?v=20261030-queue-history" defer></script>
   <script src="/static/widgets.bundle.js" defer></script>
 </body>
 </html>

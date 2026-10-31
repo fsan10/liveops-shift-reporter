@@ -9,11 +9,13 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from liveops.bitable import BitableClient
@@ -33,6 +35,7 @@ from liveops.models import (
     ShiftSchedule,
 )
 from liveops.portal import schedule_end_datetime, shift_datetime
+from liveops.roster_import import MAX_FILE_BYTES, read_roster, roster_template
 from liveops.security import SecretBox
 from liveops.service import RunDispatcher, now_local, schedule_end, schedule_start
 from liveops.settings import (
@@ -313,6 +316,60 @@ def _run_json(row: CollectionRun) -> dict[str, Any]:
         "finished_at": _utc_iso(row.finished_at),
         "created_at": _utc_iso(row.created_at),
     }
+
+
+def _screenshot_history_json(row: ScreenshotRequest) -> dict[str, Any]:
+    from liveops.sessions import local_datetime
+
+    delivery = row.delivery_json or {}
+    message = delivery.get("reason") or delivery.get("error") or {
+        "missed": "错过计划采集时点，未补造历史截图或累计快照。",
+        "skipped": "该截图计划已跳过。",
+        "failed": "截图计划执行失败，请检查运行记录。",
+    }.get(row.status, "")
+    return {
+        "id": f"screenshot-request:{row.id}", "entry_type": "screenshot_request",
+        "schedule_id": row.schedule_id,
+        "kind": "hourly_screenshot_plan" if row.target == "hourly" else "anchor_screenshot_plan",
+        "trigger": "scheduler", "status": row.status, "message": message,
+        "planned_at": local_datetime(row.planned_at).isoformat(),
+        "started_at": None, "finished_at": None, "created_at": _utc_iso(row.created_at),
+        "missing_fields": [message] if row.status in {"missed", "failed"} else [],
+        "result": {"screenshot_request_id": row.id, "screenshot_target": row.target,
+                   "planned_at": local_datetime(row.planned_at).isoformat(),
+                   "capture_status": row.status, "delivery": delivery,
+                   "screenshots": row.screenshots_json or [], "executed": False},
+    }
+
+
+def _run_history_page(db: Session, offset: int, size: int) -> tuple[list[dict[str, Any]], int]:
+    """Merge actual runs and unexecuted terminal plans without duplicating shared captures."""
+    from liveops.sessions import local_datetime
+
+    unexecuted = (CollectionRun.id.is_(None), ScreenshotRequest.status.in_(["missed", "skipped", "failed"]))
+    total = (db.scalar(select(func.count(CollectionRun.id))) or 0) + (db.scalar(
+        select(func.count(ScreenshotRequest.id)).outerjoin(
+            CollectionRun, CollectionRun.id == ScreenshotRequest.run_id).where(*unexecuted)) or 0)
+    if offset >= total:
+        return [], total
+    # Fetch only ordering metadata until pagination is resolved; raw responses stay out of this merge.
+    count = offset + size
+    run_time = func.coalesce(CollectionRun.started_at, CollectionRun.created_at)
+    runs = db.execute(select(CollectionRun.id, run_time).order_by(
+        run_time.desc(), CollectionRun.id.desc()).limit(count)).all()
+    plans = db.execute(select(ScreenshotRequest.id, ScreenshotRequest.planned_at).outerjoin(
+        CollectionRun, CollectionRun.id == ScreenshotRequest.run_id).where(*unexecuted).order_by(
+            ScreenshotRequest.planned_at.desc(), ScreenshotRequest.id.desc()).limit(count)).all()
+    entries = [(datetime.fromisoformat(_utc_iso(at)), "run", key) for key, at in runs]
+    entries.extend((local_datetime(at).astimezone(timezone.utc), "plan", key) for key, at in plans)
+    entries.sort(reverse=True)
+    selected = entries[offset:offset + size]
+    run_ids = [key for _, kind, key in selected if kind == "run"]
+    plan_ids = [key for _, kind, key in selected if kind == "plan"]
+    run_rows = {row.id: row for row in db.scalars(select(CollectionRun).where(CollectionRun.id.in_(run_ids)))}
+    plan_rows = {row.id: row for row in db.scalars(select(ScreenshotRequest).where(ScreenshotRequest.id.in_(plan_ids)))}
+    return [(_run_json(run_rows[key]) if kind == "run" else _screenshot_history_json(plan_rows[key]))
+            for _, kind, key in selected], total
 
 
 @app.middleware("http")
@@ -618,6 +675,112 @@ async def auto_fill_schedules(payload: AutoScheduleInput, request: Request) -> d
         }
 
 
+@app.get("/api/schedules/import-template")
+async def download_roster_template() -> Response:
+    content = await run_in_threadpool(roster_template, now_local().date())
+    return Response(content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="roster-import-template.xlsx"'})
+
+
+@app.post("/api/schedules/import")
+async def import_schedules(request: Request, file: UploadFile, preview: bool = True) -> Any:
+    try:
+        content = await file.read(MAX_FILE_BYTES + 1)
+    finally:
+        await file.close()
+    try:
+        rows = await run_in_threadpool(read_roster, content, file.filename or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    today = now_local().date()
+    results: list[dict[str, Any]] = []
+    counts = {"new": 0, "duplicate": 0, "historical": 0, "error": 0}
+    created_count = 0
+    note_dates: set[date] = set()
+    with _db() as db:
+        settings = db_settings(db, _store(request))
+        for source in rows:
+            item: dict[str, Any] = {
+                "row": source.number,
+                "work_date": source.work_date.isoformat() if source.work_date else "",
+                "time": f"{source.start_time}-{source.end_time}" if source.start_time else "",
+                "host_name": source.host_name, "promoter": source.promoter,
+                "rest": source.rest, "shoot": source.shoot,
+            }
+            try:
+                if source.work_date and source.work_date < today:
+                    item.update(status="historical", message="历史日期只读，跳过。")
+                else:
+                    if source.error:
+                        raise HTTPException(status_code=422, detail=source.error)
+                    note = db.get(ScheduleDay, source.work_date)
+                    changes = {}
+                    for key in ("rest", "shoot"):
+                        incoming = getattr(source, key)
+                        current = getattr(note, key) if note else ""
+                        if incoming and current and incoming != current:
+                            raise HTTPException(status_code=409, detail="休息或拍摄备注与已有内容冲突，请先在页面核对。")
+                        if incoming and not current:
+                            changes[key] = incoming
+                    new_shift = False
+                    if source.host_name:
+                        payload = ScheduleInput(
+                            work_date=source.work_date, start_time=source.start_time,
+                            end_time=source.end_time, host_name=source.host_name,
+                            promoter=source.promoter,
+                        )
+                        values = _parse_schedule_payload(payload, settings)
+                        existing = db.scalar(select(ShiftSchedule).where(
+                            ShiftSchedule.work_date == source.work_date,
+                            ShiftSchedule.start_time == values["start_time"],
+                            ShiftSchedule.end_time == values["end_time"],
+                        ))
+                        duplicate = existing and existing.host_name == values["host_name"] and existing.promoter == values["promoter"]
+                        if not duplicate:
+                            _validate_schedule(db, values)
+                            db.add(ShiftSchedule(**values))
+                            new_shift = True
+                    if changes:
+                        if note is None:
+                            note = ScheduleDay(work_date=source.work_date, rest="", shoot="")
+                            db.add(note)
+                        for key, value in changes.items():
+                            setattr(note, key, value)
+                    try:
+                        db.flush()
+                    except IntegrityError:
+                        db.rollback()
+                        return JSONResponse(status_code=409, content={
+                            "detail": "排班已被其他操作修改，请重新预览后导入。",
+                        })
+                    created_count += int(new_shift)
+                    if changes:
+                        note_dates.add(source.work_date)
+                    if new_shift or changes:
+                        item.update(status="new", message="新增班次" if new_shift else "新增日期备注")
+                    else:
+                        item.update(status="duplicate", message="内容已存在，跳过；保留现有配置和启停状态。")
+            except HTTPException as exc:
+                item.update(status="error", message=str(exc.detail))
+            counts[item["status"]] += 1
+            results.append(item)
+        valid = counts["error"] == 0
+        result = {"preview": preview, "valid": valid, "counts": counts, "rows": results,
+                  "schedule_count": created_count, "note_count": len(note_dates), "imported": False}
+        if preview or not valid:
+            db.rollback()
+        else:
+            try:
+                db.commit()
+            except IntegrityError as exc:
+                db.rollback()
+                raise HTTPException(status_code=409, detail="排班已被其他操作修改，请重新预览后导入。") from exc
+            result["imported"] = True
+        if not preview and not valid:
+            return JSONResponse(status_code=409, content=result)
+        return result
+
+
 @app.post("/api/schedules")
 async def create_schedule(payload: ScheduleInput, request: Request) -> dict[str, Any]:
     _require_editable_schedule_date(payload.work_date)
@@ -844,15 +1007,9 @@ async def list_runs(
     requested_size = page_size if page_size is not None else limit if limit is not None else 20
     per_page = max(1, min(500, requested_size))
     with _db() as db:
-        total = db.scalar(select(func.count(CollectionRun.id))) or 0
-        rows = db.scalars(
-            select(CollectionRun)
-            .order_by(CollectionRun.created_at.desc())
-            .offset((current_page - 1) * per_page)
-            .limit(per_page)
-        ).all()
+        items, total = _run_history_page(db, (current_page - 1) * per_page, per_page)
         return {
-            "items": [_run_json(row) for row in rows],
+            "items": items,
             "total": total,
             "page": current_page,
             "page_size": per_page,
@@ -862,6 +1019,12 @@ async def list_runs(
 @app.get("/api/runs/{run_id}")
 async def get_run(run_id: str) -> dict[str, Any]:
     with _db() as db:
+        if run_id.startswith("screenshot-request:"):
+            plan = db.get(ScreenshotRequest, run_id.removeprefix("screenshot-request:"))
+            if (plan is None or plan.status not in {"missed", "skipped", "failed"}
+                    or (plan.run_id and db.get(CollectionRun, plan.run_id) is not None)):
+                raise HTTPException(status_code=404, detail="截图计划记录不存在。")
+            return {"item": _screenshot_history_json(plan)}
         row = db.get(CollectionRun, run_id)
         if row is None:
             raise HTTPException(status_code=404, detail="运行记录不存在。")

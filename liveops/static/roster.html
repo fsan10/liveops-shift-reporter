@@ -308,6 +308,22 @@
   .pop-opt:hover,.pop-opt.sel{background:#eef2ff}.pop-opt.sel,.pop-opt .ck{color:var(--primary)}
   .pop-foot .ok:hover,.btn.solid:hover{background:#3459da}.tpl:hover,.tpl.sel{background:#eef2ff}
   .toast button{color:#adc0ff}
+  .import-modal{width:min(1000px,96vw);margin-top:5vh;max-height:90vh;display:flex;flex-direction:column}
+  .import-modal .modal-h,.import-modal .modal-f{flex-shrink:0}
+  .import-modal .modal-f{padding:14px 22px;border-top:1px solid var(--line)}
+  .import-modal button:disabled{opacity:.5}
+  .import-body{padding:18px 22px;overflow:auto;display:grid;gap:14px}
+  .import-help{color:var(--muted);font-size:13px;line-height:1.8;margin:0}
+  .import-tools{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .import-tools a{display:inline-flex;align-items:center;text-decoration:none}
+  .import-result{max-height:42vh;overflow:auto;border:1px solid #e0e6ef;border-radius:8px}
+  .import-result table{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}
+  .import-result th,.import-result td{padding:9px 10px;text-align:left;border-bottom:1px solid #e8ecf2}
+  .import-result th{position:sticky;top:0;background:#eef3fa;color:#284b7e}
+  .import-result td:last-child{white-space:normal;min-width:210px}
+  .import-result tr.import-error{color:#a01f1f;background:#fff5f5}
+  .import-result tr.import-historical,.import-result tr.import-duplicate{color:#788393}
+  #importSummary{font-size:13px;line-height:1.7;white-space:pre-wrap}
   @media(max-width:1450px){.topbar{position:sticky;flex-wrap:wrap;height:auto;min-height:64px;padding:10px 16px;gap:9px}}
   @media(max-width:760px){.stats{grid-template-columns:repeat(2,1fr);padding:12px}.layout{padding:12px}.sidebar{grid-template-columns:1fr}.search{width:100%;order:8}.topbar .spacer{display:none}.month-switch{order:3}.tbtn{font-size:11px}.day-card{overflow-x:auto}table.grid{min-width:700px}.tabs{padding:0 9px}.tabs>span:last-child{display:none!important}}
 </style>
@@ -332,6 +348,7 @@
     <input id="searchInput" placeholder="搜索主播 / 投手 / 日期">
   </div>
   <button class="tbtn" id="autoBtn">✦ 自动排班</button>
+  <button class="tbtn" id="importBtn" type="button">导入 Excel</button>
   <button class="tbtn" id="exportBtn">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
     导出排班
@@ -432,6 +449,18 @@
   </div>
 </div>
 
+<div class="mask" id="importMask">
+  <div class="modal import-modal" role="dialog" aria-modal="true" aria-labelledby="importTitle">
+    <div class="modal-h"><span id="importTitle">导入 Excel 排班</span><button class="x" id="importClose" aria-label="关闭">×</button></div>
+    <div class="import-body">
+      <p class="import-help">每行一个班次，必填日期、时段、主播，可填写投手、休息和日常拍摄。支持 .xlsx 和本系统导出的 .csv，最多 5 MB、2000 行，只读取第一张工作表。<br>跨午夜可填写 20:30-01:00。同日后续行可留空日期。历史日期和重复内容跳过；冲突或格式错误需修正后整批导入。导入按文件日期新增，保留已有排班和非空备注。</p>
+      <div class="import-tools"><a class="btn ghost" href="/api/schedules/import-template" download>下载 Excel 模板</a><input type="file" id="importFile" accept=".xlsx,.csv" aria-label="选择排班文件"><button class="btn ghost" id="importPreview" type="button">预览并校验</button></div>
+      <div id="importSummary" role="status" aria-live="polite">选择文件后预览，确认内容再导入。</div>
+      <div class="import-result" id="importResult" hidden></div>
+    </div>
+    <div class="modal-f"><button class="btn ghost" id="importCancel" type="button">取消</button><button class="btn solid" id="importConfirm" type="button" disabled>确认导入</button></div>
+  </div>
+</div>
 <div class="toast-wrap" id="toastWrap"></div>
 
 <div class="mask" id="interruptMask" role="dialog" aria-modal="true" aria-labelledby="interruptTitle">
@@ -2360,6 +2389,77 @@ document.getElementById('resetBtn').addEventListener('click',async()=>{
   catch(error){toast(error.message||String(error),'err');}finally{button.disabled=false;}
 });
 
+/* Excel / CSV 批量新增：预览不写入，确认时重新校验文件。 */
+let importFile = null;
+let importBusy = false;
+function resetImportPreview(){
+  importFile=null;
+  document.getElementById('importConfirm').disabled=true;
+  document.getElementById('importResult').hidden=true;
+  document.getElementById('importSummary').textContent='选择文件后预览，确认内容再导入。';
+}
+function closeImport(){
+  if(importBusy)return;
+  document.getElementById('importMask').classList.remove('show');
+  document.getElementById('importBtn').focus();
+}
+function renderImportResult(result){
+  const counts=result.counts;
+  document.getElementById('importSummary').textContent=
+    `${result.imported?'导入完成':'校验结果'}：新增 ${result.schedule_count} 个班次、${result.note_count} 个日期备注；重复跳过 ${counts.duplicate} 行，历史跳过 ${counts.historical} 行，错误 ${counts.error} 行。`+
+    (counts.error?'\n本批次未写入，请按下表行号修正文件后重新预览。':result.imported?'':!counts.new?'\n没有可新增内容，无需导入。':'\n确认后将新增以上内容，班次默认启用并按现有自动采集配置运行。');
+  const labels={new:'新增',duplicate:'重复',historical:'历史',error:'错误'};
+  const target=document.getElementById('importResult');
+  target.hidden=false;
+  target.innerHTML=`<table><thead><tr><th>行号</th><th>日期</th><th>时段</th><th>主播</th><th>投手</th><th>休息 / 拍摄</th><th>结果</th></tr></thead><tbody>${result.rows.map(row=>
+    `<tr class="import-${row.status}"><td>${row.row}</td><td>${esc(row.work_date)}</td><td>${esc(row.time)}</td><td>${esc(row.host_name)}</td><td>${esc(row.promoter)}</td><td>${esc([row.rest,row.shoot].filter(Boolean).join(' / '))}</td><td>${labels[row.status]}：${esc(row.message)}</td></tr>`
+  ).join('')}</tbody></table>`;
+  document.getElementById('importConfirm').disabled=!result.valid||result.imported||!counts.new;
+}
+async function submitRosterImport(preview){
+  if(importBusy)return;
+  const selected=document.getElementById('importFile').files?.[0];
+  if(!selected){document.getElementById('importSummary').textContent='请先选择排班文件。';return;}
+  if(!preview&&selected!==importFile){resetImportPreview();return;}
+  if(!/\.(xlsx|csv)$/i.test(selected.name)||selected.size>5*1024*1024){
+    resetImportPreview();document.getElementById('importSummary').textContent='请选择不超过 5 MB 的 .xlsx 或 .csv 文件。';return;
+  }
+  importBusy=true;
+  for(const id of ['importPreview','importConfirm','importFile','importClose','importCancel'])document.getElementById(id).disabled=true;
+  document.getElementById('importSummary').textContent=preview?'正在校验文件…':'正在导入排班…';
+  let result=null;
+  try{
+    clearTimeout(saveTimer);await syncData();
+    const form=new FormData();form.append('file',selected);
+    const response=await fetch(`/api/schedules/import?preview=${preview}`,{method:'POST',body:form});
+    result=await response.json();
+    if(!response.ok&&!result.rows)throw new Error(result.detail||`请求失败 (${response.status})`);
+    renderImportResult(result);
+    importFile=result.valid&&preview?selected:null;
+    if(result.imported){
+      undoSnap=null;
+      try{await loadRemote();}
+      catch(error){document.getElementById('importSummary').textContent+='\n排班已导入，页面刷新失败，请刷新页面查看。';}
+    }
+  }catch(error){
+    importFile=null;document.getElementById('importResult').hidden=true;
+    document.getElementById('importSummary').textContent=error.message||String(error);
+  }finally{
+    importBusy=false;
+    for(const id of ['importPreview','importFile','importClose','importCancel'])document.getElementById(id).disabled=false;
+    document.getElementById('importConfirm').disabled=!importFile||!result?.counts.new;
+  }
+}
+document.getElementById('importBtn').addEventListener('click',()=>{
+  resetImportPreview();document.getElementById('importFile').value='';
+  document.getElementById('importMask').classList.add('show');document.getElementById('importFile').focus();
+});
+document.getElementById('importFile').addEventListener('change',resetImportPreview);
+document.getElementById('importPreview').addEventListener('click',()=>submitRosterImport(true));
+document.getElementById('importConfirm').addEventListener('click',()=>submitRosterImport(false));
+for(const id of ['importClose','importCancel'])document.getElementById(id).addEventListener('click',closeImport);
+document.getElementById('importMask').addEventListener('click',event=>{if(event.target.id==='importMask')closeImport();});
+
 /* 导出 CSV（还原7列结构） */
 document.getElementById('exportBtn').addEventListener('click',()=>{
   const head=["星期","日期","时段","主播","投手","休息","日常拍摄"];
@@ -2403,6 +2503,7 @@ function checkGlobalConflicts(){
 /* 键盘 */
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){
+    if(document.getElementById('importMask').classList.contains('show')){closeImport();return;}
     closePop();closeTime();
     if(shiftMenuCtx){
       const card=document.querySelector(`[data-edit="shift"][data-day="${shiftMenuCtx.day}"][data-shift="${shiftMenuCtx.si}"]`);
